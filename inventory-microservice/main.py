@@ -80,3 +80,9 @@ async def process_drive_file(payload: FilePayload, db: Session = Depends(get_db)
     except Exception as e:
         logger.error(f"Error DB: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+if __name__ == "__main__":
+    import uvicorn
+    import os
+    port = int(os.environ.get("PORT", 10000))
+    uvicorn.run("main:app", host="0.0.0.0", port=port, reload=True)
