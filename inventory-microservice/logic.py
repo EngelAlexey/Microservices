@@ -1,5 +1,5 @@
 from sqlalchemy.orm import Session
-from models import BcItem, FnDocument, FnDocumentLn
+from models import BcItem, FnDocument, FnDocumentLn, IcMovement, IcPrice 
 from thefuzz import process, fuzz
 import uuid
 from datetime import datetime
@@ -7,8 +7,10 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-def _load_product_catalog(db: Session):
-    all_items = db.query(BcItem.ItemID, BcItem.itCode, BcItem.itTitle).all()
+def _load_product_catalog(db: Session, database_id: str):
+    all_items = db.query(BcItem.ItemID, BcItem.itCode, BcItem.itTitle)\
+                  .filter(BcItem.DatabaseID == database_id).all() 
+    
     sku_map = {}
     choices_map = {}
     for item in all_items:
@@ -18,27 +20,13 @@ def _load_product_catalog(db: Session):
             choices_map[item.itTitle] = item.ItemID
     return sku_map, choices_map
 
-def find_product_id(sku: str, description: str, sku_map: dict, choices_map: dict):
-    if sku:
-        clean_sku = sku.strip().upper()
-        if clean_sku in sku_map:
-            return sku_map[clean_sku], "Exact SKU"
-    
-    if choices_map and description:
-        best = process.extractOne(description, choices_map.keys(), scorer=fuzz.token_sort_ratio)
-        if best and best[1] >= 80:
-            return choices_map[best[0]], f"Fuzzy {best[1]}%"
-    
-    return sku or "UNKNOWN", "Raw SKU"
-
-def insert_document_logic(db: Session, data: dict, source_file_id: str, appsheet_doc_id: str = None):
+def insert_document_logic(db: Session, data: dict, source_file_id: str, appsheet_doc_id: str = None, database_id: str = "BBJ"):
     header = data.get("header", {})
     lines = data.get("lines", [])
     
-    sku_map, choices_map = _load_product_catalog(db)
+    sku_map, choices_map = _load_product_catalog(db, database_id)
     
     doc_obj = None
-    
     if appsheet_doc_id:
         doc_obj = db.query(FnDocument).filter(FnDocument.DocumentID == appsheet_doc_id).first()
     
@@ -46,16 +34,13 @@ def insert_document_logic(db: Session, data: dict, source_file_id: str, appsheet
         doc_id = appsheet_doc_id if appsheet_doc_id else str(uuid.uuid4())[:8].upper()
         doc_obj = FnDocument(DocumentID=doc_id)
         db.add(doc_obj)
-        logger.info(f"Creado nuevo documento: {doc_id}")
-    else:
-        logger.info(f"Actualizando documento existente: {appsheet_doc_id}")
-
+    
     try:
         doc_date = datetime.strptime(header.get("doDate"), "%Y-%m-%d").date()
     except:
         doc_date = datetime.now().date()
 
-    doc_obj.DatabaseID = "BBJ"
+    doc_obj.DatabaseID = database_id  
     doc_obj.doDate = doc_date
     doc_obj.doConsecutive = header.get("doConsecutive")
     doc_obj.doType = header.get("doType")
@@ -63,19 +48,14 @@ def insert_document_logic(db: Session, data: dict, source_file_id: str, appsheet
     doc_obj.doReceptor = header.get("doReceptorID")
     doc_obj.doAccount = header.get("doAccount")
     doc_obj.CurrencyID = header.get("CurrencyID", "CRC")
-    
     doc_obj.doFile = source_file_id
     doc_obj.DriveID = source_file_id
     doc_obj.doStatus = "PROCESSED_BY_AI"
-    doc_obj.doCreatedBy = "AI_MICROSERVICE"
-    doc_obj.Bot = f"Procesado. Uso IA: {data.get('usage', 'N/A')}"
+    doc_obj.Bot = f"Procesado Multi-Tenant. Uso IA: {data.get('usage', 'N/A')}"
 
     logs = []
     total_doc = 0
     line_number = 1
-    
-    total_subtotal = 0
-    total_taxes = 0
     
     for line in lines:
         clean_supply_id, match_type = find_product_id(
@@ -85,51 +65,75 @@ def insert_document_logic(db: Session, data: dict, source_file_id: str, appsheet
             choices_map=choices_map
         )
         
-        ln_id = str(uuid.uuid4())
-        
         qty = float(line.get("quantity", 0))
-        price = float(line.get("unit_price", 0))
-        discount = float(line.get("discount_amount", 0))
-        taxes = float(line.get("tax_amount", 0))
-        
-        gross_amount = qty * price
-        subtotal = gross_amount - discount
-        line_total = subtotal + taxes
+        price_unit = float(line.get("unit_price", 0))
+        total_line = float(line.get("total", (qty * price_unit))) 
+
+        ln_uuid = str(uuid.uuid4())
+        ln_id_short = ln_uuid[:8].upper() 
         
         new_ln = FnDocumentLn(
-            DocumentLnID=ln_id,
-            DocumentID=doc_obj.DocumentID, 
-            DatabaseID="BBJ",
+            DocumentLnID=ln_uuid,
+            DocumentID=doc_obj.DocumentID,
+            DatabaseID=database_id,
             dlNumber=line_number,
             SupplyID=clean_supply_id,
-            CabysID=line.get("cabys_candidate"),
             dlDescription=line.get("description"),
             dlQuantity=qty,
-            dlUnitPrice=price,
-            dlDiscount=discount,
-            dlSubtotal=subtotal,
-            dlTaxes=taxes,
-            dlTotal=line_total,
+            dlUnitPrice=price_unit,
+            dlTotal=total_line,
             dlObservations=f"Match: {match_type}"
         )
         db.add(new_ln)
-        
-        total_subtotal += subtotal
-        total_taxes += taxes
-        total_doc += line_total
-        line_number += 1
-        logs.append(f"Línea {line_number-1}: {clean_supply_id} ({match_type})")
 
-    doc_obj.doSubtotal = total_subtotal
-    doc_obj.doTaxes = total_taxes
+        if clean_supply_id and clean_supply_id != "UNKNOWN":
+            
+            mv_id = str(uuid.uuid4())[:8].upper()
+            
+            new_movement = IcMovement(
+                MovementID=mv_id,
+                DatabaseID=database_id,
+                OriginID=doc_obj.doIssuer,
+                ItemID=clean_supply_id,
+                DocumentLnID=ln_id_short, 
+                mvDate=doc_date,
+                mvAction="INGRESO",        
+                mvQuantity=qty,
+                mvStatus="Applied",
+                mvNotes=f"Auto-generado por Factura {doc_obj.doConsecutive}",
+                mvCreatedby="AI_BOT"
+            )
+            db.add(new_movement)
+            
+            pr_id = str(uuid.uuid4())[:8].upper()
+            
+            new_price = IcPrice(
+                PriceID=pr_id,
+                DatabaseID=database_id,
+                ItemID=clean_supply_id,
+                MovementID=mv_id,         
+                prTitle=f"Lote Fac {doc_obj.doConsecutive}",
+                prDescription=line.get("description"),
+                prQuantity=qty,
+                prPrice=price_unit,
+                prTotal=total_line,
+                prCreatedby="AI_BOT"
+            )
+            db.add(new_price)
+            
+            logs.append(f"Línea {line_number}: {clean_supply_id} -> Movimiento {mv_id} Creado.")
+        else:
+            logs.append(f"Línea {line_number}: Producto NO identificado. No se generó movimiento.")
+
+        total_doc += total_line
+        line_number += 1
+
     doc_obj.doTotal = total_doc
-    
     db.commit()
     
     return {
         "status": "success", 
         "document_id": doc_obj.DocumentID, 
-        "lines_count": line_number - 1,
         "logs": logs,
-        "mode": "UPDATE_APPEND"
+        "database_id": database_id
     }
