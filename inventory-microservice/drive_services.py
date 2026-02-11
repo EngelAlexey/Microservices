@@ -37,6 +37,7 @@ def get_drive_service():
 
 def download_with_validation(file_id):
     
+    """
     Returns:
         tuple: (file_bytes, metadata_dict) o (None, None) si falla.
     """
