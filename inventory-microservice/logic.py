@@ -45,42 +45,61 @@ def find_product_id(sku: str, description: str, sku_map: dict, choices_map: dict
     return sku or "UNKNOWN", "Raw SKU"
 
 
-def insert_document_logic(db: Session, data: dict, source_file_id: str):
+def insert_document_logic(db: Session, data: dict, source_file_id: str, appsheet_doc_id: str = None):
     header = data.get("header", {})
     lines = data.get("lines", [])
     
     sku_map, choices_map = _load_product_catalog(db)
     
-    doc_id = str(uuid.uuid4())[:8].upper()
+    # 1. DETERMINAR SI ES UPDATE O INSERT
+    doc_obj = None
+    if appsheet_doc_id:
+        doc_id = appsheet_doc_id
+        doc_obj = db.query(FnDocument).filter(FnDocument.DocumentID == appsheet_doc_id).first()
+    else:
+        doc_id = str(uuid.uuid4())[:8].upper()
     
+    if not doc_obj:
+        # Si no existe (o no enviaron ID), creamos instancia nueva
+        doc_obj = FnDocument(DocumentID=doc_id)
+        db.add(doc_obj)
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.info(f"Creado nuevo documento: {doc_id}")
+    else:
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.info(f"Actualizando documento existente: {appsheet_doc_id}")
+
+    # 2. ACTUALIZAR CAMPOS (Sea nuevo o existente)
     try:
         doc_date = datetime.strptime(header.get("doDate"), "%Y-%m-%d").date()
     except:
         doc_date = datetime.now().date()
 
-    current_db_id = "BBJ"
+    doc_obj.DatabaseID = "BBJ"
+    doc_obj.doDate = doc_date
+    doc_obj.doConsecutive = header.get("doConsecutive")
+    doc_obj.doType = header.get("doType")
+    doc_obj.doIssuer = header.get("doIssuerID")
+    doc_obj.doReceptor = header.get("doReceptorID")
+    doc_obj.doAccount = header.get("doAccount")
+    doc_obj.CurrencyID = header.get("CurrencyID", "CRC")
     
-    new_doc = FnDocument(
-        DocumentID=doc_id,
-        DatabaseID=current_db_id,
-        doDate=doc_date,
-        doConsecutive=header.get("doConsecutive"),
-        doType=header.get("doType"),
-        doIssuer=header.get("doIssuerID"),
-        doReceptor=header.get("doReceptorID"),
-        doFile=source_file_id,
-        DriveID=source_file_id,
-        doStatus="READY_FOR_BOT",
-        doCreatedBy="AI_MICROSERVICE",
-        doTotal=0, 
-        Bot=f"Procesado por Microservicio Python. Uso IA: {data.get('usage', 'N/A')}"
-    )
-    db.add(new_doc)
+    doc_obj.doFile = source_file_id
+    doc_obj.DriveID = source_file_id
+    
+    doc_obj.doStatus = "PROCESSED_BY_AI"
+    doc_obj.doCreatedBy = "AI_MICROSERVICE_UPDATE" if appsheet_doc_id else "AI_MICROSERVICE"
+    doc_obj.Bot = f"Procesado. Modo: {'UPDATE' if appsheet_doc_id else 'INSERT'}. Uso IA: {data.get('usage', 'N/A')}"
+
+    # 3. PROCESAR LÍNEAS
+    # Borrar líneas previas vinculadas al doc_id
+    db.query(FnDocumentLn).filter(FnDocumentLn.DocumentID == doc_id).delete()
     
     logs = []
     total_doc = 0
     line_number = 1
-    
     total_subtotal = 0
     total_taxes = 0
     
@@ -92,21 +111,18 @@ def insert_document_logic(db: Session, data: dict, source_file_id: str):
             choices_map=choices_map
         )
         
-        ln_id = str(uuid.uuid4())
-        
         qty = float(line.get("quantity", 0))
         price = float(line.get("unit_price", 0))
         discount = float(line.get("discount_amount", 0))
         taxes = float(line.get("tax_amount", 0))
         
-        gross_amount = qty * price
-        subtotal = gross_amount - discount
+        subtotal = (qty * price) - discount
         line_total = subtotal + taxes
         
         new_ln = FnDocumentLn(
-            DocumentLnID=ln_id,
+            DocumentLnID=str(uuid.uuid4()),
             DocumentID=doc_id,
-            DatabaseID=current_db_id,
+            DatabaseID="BBJ",
             dlNumber=line_number,
             SupplyID=clean_supply_id,
             CabysID=line.get("cabys_candidate"),
@@ -124,12 +140,13 @@ def insert_document_logic(db: Session, data: dict, source_file_id: str):
         total_subtotal += subtotal
         total_taxes += taxes
         total_doc += line_total
+        logs.append(f"L{line_number}: {clean_supply_id} ({match_type})")
         line_number += 1
-        logs.append(f"Línea {line_number-1}: {clean_supply_id} ({match_type})")
 
-    new_doc.doSubtotal = total_subtotal
-    new_doc.doTaxes = total_taxes
-    new_doc.doTotal = total_doc
+    # 4. ACTUALIZAR TOTALES EN CABECERA
+    doc_obj.doSubtotal = total_subtotal
+    doc_obj.doTaxes = total_taxes
+    doc_obj.doTotal = total_doc
     
     db.commit()
     
@@ -137,5 +154,6 @@ def insert_document_logic(db: Session, data: dict, source_file_id: str):
         "status": "success", 
         "document_id": doc_id, 
         "lines_count": line_number - 1,
+        "mode": "UPDATE" if appsheet_doc_id else "INSERT",
         "logs": logs
     }
