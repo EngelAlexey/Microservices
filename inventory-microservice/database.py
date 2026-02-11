@@ -24,7 +24,7 @@ if not os.path.exists(ssl_cert_path):
 if os.path.exists(ssl_cert_path):
     ssl_context = ssl.create_default_context(cafile=ssl_cert_path)
     ssl_context.check_hostname = False
-    ssl_context.verify_mode = ssl.CERT_REQUIRED
+    ssl_context.verify_mode = ssl.CERT_NONE
 else:
     ssl_context = None
     print(f"WARNING: SSL certificate not found at {ssl_cert_path}")
