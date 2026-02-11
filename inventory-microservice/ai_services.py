@@ -6,7 +6,6 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# Nuevo SDK: google-genai (reemplaza google.generativeai deprecado)
 _client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 
 _PROMPT = """Extract data from this Costa Rican invoice PDF.
@@ -47,7 +46,7 @@ def extract_invoice_data(pdf_content_bytes):
                 response_mime_type="application/json",
                 temperature=0.1,
                 thinking_config=types.ThinkingConfig(
-                    thinking_budget=0  # Sin razonamiento = respuesta directa
+                    thinking_budget=0 
                 ),
             )
         )
@@ -55,7 +54,6 @@ def extract_invoice_data(pdf_content_bytes):
         text = response.text.replace('```json', '').replace('```', '')
         data = json.loads(text)
         
-        # Capturar uso de tokens
         usage = response.usage_metadata
         print(f"DEBUG: Usage Metadata from Gemini: {usage}")
         
