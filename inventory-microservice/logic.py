@@ -138,9 +138,9 @@ def insert_document_logic(db: Session, data: dict, source_file_id: str, appsheet
                 MovementID=mv_id,
                 DatabaseID=database_id,
                 OriginID=truncated_origin,
-                ProjectID=matched_project_id,
+                ProjectID=None, # Dejado vacío según solicitud
                 ItemID=truncated_item,
-                DocumentLnID=ln_id_short, 
+                DocumentLnID=(line.get("description") or "UNKNOWN")[:10], 
                 mvDate=doc_date,
                 mvAction="IN",        
                 mvQuantity=qty,
@@ -156,7 +156,7 @@ def insert_document_logic(db: Session, data: dict, source_file_id: str, appsheet
                 PriceID=pr_id,
                 DatabaseID=database_id,
                 ItemID=truncated_item,
-                ProjectID=matched_project_id,
+                ProjectID=None, # Dejado vacío según solicitud
                 MovementID=mv_id,         
                 prTitle=f"Lote Fac {doc_obj.doConsecutive}",
                 prDescription=line.get("description"),
