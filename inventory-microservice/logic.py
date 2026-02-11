@@ -110,11 +110,15 @@ def insert_document_logic(db: Session, data: dict, source_file_id: str, appsheet
             
             mv_id = str(uuid.uuid4())[:8].upper()
             
+            # Truncate values to fit varchar(10) in auxiliary tables
+            truncated_origin = (doc_obj.doIssuer or "")[:10]
+            truncated_item = (clean_supply_id or "")[:10]
+
             new_movement = IcMovement(
                 MovementID=mv_id,
                 DatabaseID=database_id,
-                OriginID=doc_obj.doIssuer,
-                ItemID=clean_supply_id,
+                OriginID=truncated_origin,
+                ItemID=truncated_item,
                 DocumentLnID=ln_id_short, 
                 mvDate=doc_date,
                 mvAction="INGRESO",        
@@ -130,7 +134,7 @@ def insert_document_logic(db: Session, data: dict, source_file_id: str, appsheet
             new_price = IcPrice(
                 PriceID=pr_id,
                 DatabaseID=database_id,
-                ItemID=clean_supply_id,
+                ItemID=truncated_item,
                 MovementID=mv_id,         
                 prTitle=f"Lote Fac {doc_obj.doConsecutive}",
                 prDescription=line.get("description"),

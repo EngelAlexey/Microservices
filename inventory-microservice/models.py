@@ -43,7 +43,7 @@ class FnDocumentLn(Base):
     
     DocumentLnID = Column(String(60), primary_key=True)
     DatabaseID = Column(String(10), nullable=True)
-    DocumentID = Column(String(10))     
+    DocumentID = Column(String(150))     
     dlNumber = Column(Integer, nullable=True)
     
     SupplyID = Column(Text)             
@@ -67,7 +67,7 @@ class IcMovement(Base):
     isDeleted = Column(Boolean, default=False)
     DatabaseID = Column(String(10))
     OriginID = Column(String(10))     
-    ProjectID = Column(String(10))    
+    ProjectID = Column(String(10), nullable=True)
     ItemID = Column(String(10))       
     DocumentLnID = Column(String(10)) 
     mvDate = Column(DateTime, default=datetime.datetime.now)
@@ -85,7 +85,7 @@ class IcPrice(Base):
     isDeleted = Column(Boolean, default=False)
     DatabaseID = Column(String(10))
     ItemID = Column(String(10))
-    ProjectID = Column(String(10))
+    ProjectID = Column(String(10), nullable=True)
     MovementID = Column(String(10)) 
     prTitle = Column(String(150))   
     prDescription = Column(Text)
