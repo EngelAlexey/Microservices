@@ -1,0 +1,13 @@
+fastapi
+uvicorn
+sqlalchemy
+pymysql
+google-genai
+google-api-python-client
+google-auth-httplib2
+google-auth-oauthlib
+python-multipart
+thefuzz
+python-Levenshtein
+python-dotenv
+pydantic
