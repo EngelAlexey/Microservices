@@ -95,3 +95,10 @@ class IcPrice(Base):
     prTotal = Column(DECIMAL(13, 2))
     prCreatedby = Column(String(10), default="AI_BOT")
     prCreateddate = Column(DateTime, default=datetime.datetime.now)
+
+class DrProject(Base):
+    __tablename__ = "drProjects"
+    ProjectID = Column(String(10), primary_key=True)
+    DatabaseID = Column(String(30))
+    pjTitle = Column(String(100))
+    pjAddress = Column(String(200))

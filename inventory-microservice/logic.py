@@ -1,5 +1,5 @@
 from sqlalchemy.orm import Session
-from models import BcItem, FnDocument, FnDocumentLn, IcMovement, IcPrice 
+from models import BcItem, FnDocument, FnDocumentLn, IcMovement, IcPrice, DrProject
 from thefuzz import process, fuzz
 import uuid
 from datetime import datetime
@@ -8,6 +8,7 @@ import logging
 logger = logging.getLogger(__name__)
 
 def _load_product_catalog(db: Session, database_id: str):
+    """Carga el catálogo de productos por DatabaseID."""
     all_items = db.query(BcItem.ItemID, BcItem.itCode, BcItem.itTitle)\
                   .filter(BcItem.DatabaseID == database_id).all() 
     
@@ -20,13 +21,8 @@ def _load_product_catalog(db: Session, database_id: str):
             choices_map[item.itTitle] = item.ItemID
     return sku_map, choices_map
 
-
 def find_product_id(sku: str, description: str, sku_map: dict, choices_map: dict):
-    """Busca el ItemID usando 2 métodos:
-    
-    1. Búsqueda exacta por SKU (en memoria, O(1))
-    2. Fuzzy match por descripción (fallback, en memoria)
-    """
+    """Busca el ItemID usando SKU y Fuzzy Match por descripción."""
     if sku:
         clean_sku = sku.strip().upper()
         if clean_sku in sku_map:
@@ -39,12 +35,36 @@ def find_product_id(sku: str, description: str, sku_map: dict, choices_map: dict
     
     return sku or "UNKNOWN", "Raw SKU"
 
+def _load_project_catalog(db: Session, database_id: str):
+    projects = db.query(DrProject.ProjectID, DrProject.pjTitle, DrProject.pjAddress)\
+                 .filter(DrProject.DatabaseID == database_id).all()
+    project_choices = {}
+    for pj in projects:
+        # Usamos tanto el título como la dirección para el matching
+        key = f"{pj.pjTitle or ''} {pj.pjAddress or ''}".strip()
+        if key:
+            project_choices[key] = pj.ProjectID
+    return project_choices
+
+def find_project_id(address_text: str, project_choices: dict):
+    if not address_text or not project_choices:
+        return None
+    # Usamos partial_ratio para proyectos porque las direcciones suelen ser largas y contener el nombre
+    best = process.extractOne(address_text, project_choices.keys(), scorer=fuzz.partial_ratio)
+    if best and best[1] >= 75: 
+        return project_choices[best[0]]
+    return None
 
 def insert_document_logic(db: Session, data: dict, source_file_id: str, appsheet_doc_id: str = None, database_id: str = "BBJ"):
     header = data.get("header", {})
     lines = data.get("lines", [])
     
     sku_map, choices_map = _load_product_catalog(db, database_id)
+    project_choices = _load_project_catalog(db, database_id)
+    
+    # Matching de proyecto basado en las direcciones extraídas
+    address_to_match = f"{header.get('doIssuerAddress', '')} {header.get('doReceptorAddress', '')}"
+    matched_project_id = find_project_id(address_to_match, project_choices)
     
     doc_obj = None
     if appsheet_doc_id:
@@ -71,7 +91,7 @@ def insert_document_logic(db: Session, data: dict, source_file_id: str, appsheet
     doc_obj.doFile = source_file_id
     doc_obj.DriveID = source_file_id
     doc_obj.doStatus = "PROCESSED_BY_AI"
-    doc_obj.Bot = f"Procesado Multi-Tenant. Uso IA: {data.get('usage', 'N/A')}"
+    doc_obj.Bot = f"Procesado c/Proyecto: {matched_project_id or 'N/A'}. Uso IA: {data.get('usage', 'N/A')}"
 
     logs = []
     total_doc = 0
@@ -118,8 +138,9 @@ def insert_document_logic(db: Session, data: dict, source_file_id: str, appsheet
                 MovementID=mv_id,
                 DatabaseID=database_id,
                 OriginID=truncated_origin,
+                ProjectID=matched_project_id,
                 ItemID=truncated_item,
-                DocumentLnID=line.get("description")[:10] if line.get("description") else "UNKNOWN", 
+                DocumentLnID=ln_id_short, 
                 mvDate=doc_date,
                 mvAction="IN",        
                 mvQuantity=qty,
@@ -135,6 +156,7 @@ def insert_document_logic(db: Session, data: dict, source_file_id: str, appsheet
                 PriceID=pr_id,
                 DatabaseID=database_id,
                 ItemID=truncated_item,
+                ProjectID=matched_project_id,
                 MovementID=mv_id,         
                 prTitle=f"Lote Fac {doc_obj.doConsecutive}",
                 prDescription=line.get("description"),
@@ -159,5 +181,6 @@ def insert_document_logic(db: Session, data: dict, source_file_id: str, appsheet
         "status": "success", 
         "document_id": doc_obj.DocumentID, 
         "logs": logs,
-        "database_id": database_id
+        "database_id": database_id,
+        "matched_project": matched_project_id
     }
