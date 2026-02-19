@@ -138,6 +138,8 @@ class IcPrice(Base):
     prTotal = Column(DECIMAL(13, 2))
     prCreatedby = Column(String(10), default="AI_BOT")
     prCreateddate = Column(DateTime, default=datetime.datetime.now)
+    prModifiedby = Column(String(10))
+    prModifieddate = Column(DateTime)
 
 class DrProject(Base):
     __tablename__ = "drProjects"

@@ -11,10 +11,10 @@ def _load_product_catalog(db: Session, database_id: str):
     """Carga el catálogo de productos por DatabaseID.
     
     Hace JOIN entre bcItems (producto padre) y bcItemsLns (variantes)
-    para obtener lnCode (SKU) y itTitle (nombre del producto).
-    Retorna ItemID (producto padre) porque icMovements/icPrices referencian ItemID.
+    para obtener lnCode (SKU) y nombres.
+    Retorna ItemLnID (variante) para diferenciar presentaciones en inventario.
     """
-    all_items = db.query(BcItemLn.ItemLnID, BcItemLn.lnCode, BcItemLn.ItemID, BcItem.itTitle)\
+    all_items = db.query(BcItemLn.ItemLnID, BcItemLn.lnCode, BcItemLn.lnTitle, BcItem.itTitle)\
                   .join(BcItem, BcItemLn.ItemID == BcItem.ItemID)\
                   .filter(BcItemLn.DatabaseID == database_id)\
                   .filter(BcItemLn.isDeleted == False)\
@@ -24,9 +24,11 @@ def _load_product_catalog(db: Session, database_id: str):
     choices_map = {}
     for item in all_items:
         if item.lnCode:
-            sku_map[item.lnCode.strip().upper()] = item.ItemID
-        if item.itTitle and item.itTitle not in choices_map:
-            choices_map[item.itTitle] = item.ItemID
+            sku_map[item.lnCode.strip().upper()] = item.ItemLnID
+        # Se prioriza el nombre del producto padre, pero se puede usar el de la variante
+        title = item.itTitle or item.lnTitle
+        if title and title not in choices_map:
+            choices_map[title] = item.ItemLnID
     return sku_map, choices_map
 
 def find_product_id(sku: str, description: str, sku_map: dict, choices_map: dict):
