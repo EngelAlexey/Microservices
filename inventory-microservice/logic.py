@@ -1,5 +1,5 @@
 from sqlalchemy.orm import Session
-from models import BcItem, FnDocument, FnDocumentLn, IcMovement, IcPrice, DrProject
+from models import BcItem, BcItemLn, FnDocument, FnDocumentLn, IcMovement, IcPrice, DrProject
 from thefuzz import process, fuzz
 import uuid
 from datetime import datetime
@@ -8,16 +8,24 @@ import logging
 logger = logging.getLogger(__name__)
 
 def _load_product_catalog(db: Session, database_id: str):
-    """Carga el catálogo de productos por DatabaseID."""
-    all_items = db.query(BcItem.ItemID, BcItem.itCode, BcItem.itTitle)\
-                  .filter(BcItem.DatabaseID == database_id).all() 
+    """Carga el catálogo de productos por DatabaseID.
+    
+    Hace JOIN entre bcItems (producto padre) y bcItemsLns (variantes)
+    para obtener lnCode (SKU) y itTitle (nombre del producto).
+    Retorna ItemID (producto padre) porque icMovements/icPrices referencian ItemID.
+    """
+    all_items = db.query(BcItemLn.ItemLnID, BcItemLn.lnCode, BcItemLn.ItemID, BcItem.itTitle)\
+                  .join(BcItem, BcItemLn.ItemID == BcItem.ItemID)\
+                  .filter(BcItemLn.DatabaseID == database_id)\
+                  .filter(BcItemLn.isDeleted == False)\
+                  .filter(BcItem.isDeleted == False).all()
     
     sku_map = {}
     choices_map = {}
     for item in all_items:
-        if item.itCode:
-            sku_map[item.itCode.strip().upper()] = item.ItemID
-        if item.itTitle:
+        if item.lnCode:
+            sku_map[item.lnCode.strip().upper()] = item.ItemID
+        if item.itTitle and item.itTitle not in choices_map:
             choices_map[item.itTitle] = item.ItemID
     return sku_map, choices_map
 

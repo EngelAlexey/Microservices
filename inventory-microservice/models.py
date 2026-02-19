@@ -1,14 +1,57 @@
-from sqlalchemy import Column, String, Float, Date, DateTime, Text, Integer, DECIMAL, Boolean
+from sqlalchemy import Column, String, Float, Date, DateTime, Text, Integer, DECIMAL, Boolean, ForeignKey
 from database import Base
 import datetime
 
 class BcItem(Base):
     __tablename__ = "bcItems"
     ItemID = Column(String(20), primary_key=True)
+    isDeleted = Column(Boolean, default=False)
     DatabaseID = Column(String(10))
-    itCode = Column(String(50))
-    CabysID = Column(String(20))
+    itImage = Column(String(255))
+    itCategory = Column(String(45))
+    itSubcategory = Column(String(45))
     itTitle = Column(String(300))
+    itDescription = Column(Text)
+    itBrand = Column(String(20))
+    itCertification = Column(String(45))
+    CabysID = Column(String(20))
+    itObservations = Column(Text)
+    itStatus = Column(Boolean, default=True)
+    itCreatedBy = Column(String(20))
+    itCreatedAt = Column(DateTime, default=datetime.datetime.now)
+    itModifiedBy = Column(String(20))
+    itModifiedAt = Column(DateTime, default=datetime.datetime.now)
+    itEnabled = Column(Text)
+    Bot = Column(String(100))
+
+class BcItemLn(Base):
+    __tablename__ = "bcItemsLns"
+    ItemLnID = Column(String(20), primary_key=True)
+    ItemID = Column(String(20), ForeignKey("bcItems.ItemID"), nullable=False)
+    isDeleted = Column(Boolean, default=False)
+    DatabaseID = Column(String(10))
+    lnCode = Column(String(50), nullable=False)
+    lnBarcode = Column(String(50))
+    lnTitle = Column(String(150))
+    lnSpecs = Column(String(100))
+    lnSize = Column(String(100))
+    UnitID = Column(String(45))
+    inCertification = Column(String(45))
+    lnWeight = Column(Text)
+    lnQuantity = Column(DECIMAL(13, 2), default=0)
+    lnReserved = Column(DECIMAL(13, 2), default=0)
+    lnAvailable = Column(DECIMAL(13, 2))
+    lnMin = Column(DECIMAL(13, 2))
+    lnMax = Column(DECIMAL(13, 2))
+    lnReorder = Column(DECIMAL(13, 2))
+    lnFeatures = Column(Text)
+    lnObservations = Column(Text)
+    lnStatus = Column(Boolean, default=True)
+    lnCreatedBy = Column(String(20))
+    lnCreatedAt = Column(DateTime, default=datetime.datetime.now)
+    lnModifiedBy = Column(String(20))
+    lnModifiedAt = Column(DateTime, default=datetime.datetime.now)
+    Bot = Column(String(100))
 
 class FnDocument(Base):
     __tablename__ = "fnDocuments"
