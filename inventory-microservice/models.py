@@ -122,7 +122,7 @@ class IcMovement(Base):
     mvCreateddate = Column(DateTime, default=datetime.datetime.now)
 
 class IcPrice(Base):
-    __tablename__ = "icPrices"
+    __tablename__ = "icItemsPrices"
     
     PriceID = Column(String(10), primary_key=True)
     isDeleted = Column(Boolean, default=False)
