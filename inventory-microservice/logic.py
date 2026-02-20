@@ -32,16 +32,18 @@ def _load_product_catalog(db: Session, database_id: str):
     return sku_map, choices_map
 
 def find_product_id(sku: str, description: str, sku_map: dict, choices_map: dict):
-    """Busca el ItemID usando SKU y Fuzzy Match por descripción."""
-    if sku:
-        clean_sku = sku.strip().upper()
-        if clean_sku in sku_map:
-            return sku_map[clean_sku], "Exact SKU"
-    
+    """Busca el ItemLnID priorizando Fuzzy Match por descripción sobre SKU."""
+    # 1. Intentar por descripción (Fuzzy Match) - Prioridad Alta
     if choices_map and description:
         best = process.extractOne(description, choices_map.keys(), scorer=fuzz.token_sort_ratio)
         if best and best[1] >= 80:
             return choices_map[best[0]], f"Fuzzy {best[1]}%"
+    
+    # 2. Fallback: Intentar por SKU exacto
+    if sku:
+        clean_sku = sku.strip().upper()
+        if clean_sku in sku_map:
+            return sku_map[clean_sku], "Exact SKU"
     
     return sku or "UNKNOWN", "Raw SKU"
 
