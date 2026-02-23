@@ -3,8 +3,8 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from database import get_db, engine, Base, SessionLocal
 from models import FnDocument 
-from ai_services import extract_invoice_data
-from logic import insert_document_logic 
+from ai_services import extract_invoice_data, extract_company_data
+from logic import insert_document_logic, upsert_company_from_invoice_logic
 from drive_services import download_with_validation
 import logging
 import time
@@ -23,6 +23,7 @@ class FilePayload(BaseModel):
     file_name: str = ""
     doc_id: str = None
     database_id: str
+    company_id: str = None
 
 @app.get("/")
 def read_root():
@@ -73,6 +74,49 @@ async def process_drive_file(payload: FilePayload, db: Session = Depends(get_db)
     try:
         result = insert_document_logic(db, data, source_file_id=file_id, appsheet_doc_id=payload.doc_id, database_id=payload.database_id)
         logger.info(f"⏱️ Paso 4 - DB Insert: {time.time() - t3:.2f}s")
+        
+        total_time = time.time() - request_start
+        logger.info(f"TOTAL: {total_time:.2f}s para archivo {file_id}")
+        
+        result["processing_time_seconds"] = round(total_time, 2)
+        return {"status": "success", "data": result}
+    except Exception as e:
+        logger.error(f"Error DB: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/webhook/extract-company")
+async def extract_company(payload: FilePayload, db: Session = Depends(get_db)):
+    file_id = payload.file_id
+    request_start = time.time()
+    logger.info(f"⏱️ Procesando archivo ID (Company Extra): {file_id}")
+
+    t0 = time.time()
+    loop = asyncio.get_event_loop()
+    
+    drive_future = loop.run_in_executor(_executor, download_with_validation, file_id)
+    content, meta = await drive_future
+    logger.info(f"⏱️ Paso 1 - Drive: {time.time() - t0:.2f}s")
+    
+    if not content:
+        raise HTTPException(status_code=404, detail="Archivo no accesible o no existe en Drive")
+
+    t2 = time.time()
+    data = extract_company_data(content)
+    logger.info(f"⏱️ Paso 2 - Gemini AI Company Extra: {time.time() - t2:.2f}s")
+    
+    if not data:
+        raise HTTPException(status_code=422, detail="Fallo extracción IA para empresa")
+
+    t3 = time.time()
+    try:
+        result = upsert_company_from_invoice_logic(
+            db, 
+            data, 
+            source_file_id=file_id, 
+            database_id=payload.database_id,
+            target_company_id=payload.company_id
+        )
+        logger.info(f"⏱️ Paso 3 - DB Upsert: {time.time() - t3:.2f}s")
         
         total_time = time.time() - request_start
         logger.info(f"TOTAL: {total_time:.2f}s para archivo {file_id}")

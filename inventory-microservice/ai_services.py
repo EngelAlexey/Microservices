@@ -17,9 +17,23 @@ Return JSON:
     "header": {
         "doConsecutive": "string",
         "doDate": "YYYY-MM-DD",
-        "doIssuerID": "string", 
-        "doIssuerName": "string",
-        "doType": "FE or NC"
+        "doType": "FE or NC",
+        "issuer": {
+            "cpName": "string or null - Official legal name",
+            "cpTitle": "string or null - Commercial name",
+            "cpIdentification": "string or null - Tax ID / Corporate ID",
+            "cpAddress": "string or null - Full address",
+            "cpPhone": "string or null",
+            "cpEmail": "string or null"
+        },
+        "receptor": {
+            "cpName": "string or null - Official legal name",
+            "cpTitle": "string or null - Commercial name",
+            "cpIdentification": "string or null - Tax ID / Corporate ID",
+            "cpAddress": "string or null - Full address",
+            "cpPhone": "string or null",
+            "cpEmail": "string or null"
+        }
     },
     "lines": [
         { 
@@ -67,4 +81,50 @@ def extract_invoice_data(pdf_content_bytes):
         return data
     except Exception as e:
         print(f"Error parsing Gemini JSON: {e}")
+        return None
+
+_COMPANY_PROMPT = """Extract the underlying company data from this document, specifically looking for the issuer or client details.
+Focus on identifying the company that issued the invoice or the client it was billed to.
+Return exactly one JSON object representing the most important company found in the document (usually the issuer).
+
+Return JSON format:
+{
+    "cpName": "string or null - The official legal name of the company",
+    "cpTitle": "string or null - The commercial/trade name if different from legal name",
+    "cpIdentification": "string or null - The tax ID, VAT number, or corporate identification number",
+    "cpAddress": "string or null - Full address",
+    "cpEmail": "string or null - Primary contact email",
+    "cpPhone": "string or null - Primary contact phone number"
+}"""
+
+def extract_company_data(pdf_content_bytes):
+    try:
+        response = _client.models.generate_content(
+            model='gemini-2.5-flash',
+            contents=[
+                types.Part.from_bytes(data=pdf_content_bytes, mime_type="application/pdf"),
+                _COMPANY_PROMPT
+            ],
+            config=types.GenerateContentConfig(
+                response_mime_type="application/json",
+                temperature=0.1,
+                thinking_config=types.ThinkingConfig(
+                    thinking_budget=0 
+                ),
+            )
+        )
+        
+        text = response.text.replace('```json', '').replace('```', '')
+        data = json.loads(text)
+        
+        usage = response.usage_metadata
+        data['usage'] = {
+            'prompt_tokens': usage.prompt_token_count,
+            'candidates_tokens': usage.candidates_token_count,
+            'total_tokens': usage.total_token_count
+        }
+        
+        return data
+    except Exception as e:
+        print(f"Error parsing Gemini JSON for company data: {e}")
         return None

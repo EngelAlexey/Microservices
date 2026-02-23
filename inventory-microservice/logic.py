@@ -1,5 +1,5 @@
 from sqlalchemy.orm import Session
-from models import BcItem, BcItemLn, FnDocument, FnDocumentLn, IcMovement, IcPrice, DrProject
+from models import BcItem, BcItemLn, FnDocument, FnDocumentLn, IcMovement, IcPrice, DrProject, DrCompany
 from thefuzz import process, fuzz
 import uuid
 from datetime import datetime
@@ -74,8 +74,26 @@ def insert_document_logic(db: Session, data: dict, source_file_id: str, appsheet
     sku_map, choices_map = _load_product_catalog(db, database_id)
     project_choices = _load_project_catalog(db, database_id)
     
+    issuer_data = header.get("issuer", {})
+    receptor_data = header.get("receptor", {})
+
+    issuer_id = header.get("doIssuerID")
+    receptor_id = header.get("doReceptorID")
+    
+    # Upsert Issuer
+    if issuer_data and any(issuer_data.values()):
+        issuer_res = upsert_company_from_invoice_logic(db, issuer_data, source_file_id, database_id, update_if_exists=False)
+        if issuer_res.get("status") == "success":
+            issuer_id = issuer_res.get("company_id")
+            
+    # Upsert Receptor
+    if receptor_data and any(receptor_data.values()):
+        receptor_res = upsert_company_from_invoice_logic(db, receptor_data, source_file_id, database_id, update_if_exists=False)
+        if receptor_res.get("status") == "success":
+            receptor_id = receptor_res.get("company_id")
+            
     # Matching de proyecto basado en las direcciones extraídas
-    address_to_match = f"{header.get('doIssuerAddress', '')} {header.get('doReceptorAddress', '')}"
+    address_to_match = f"{issuer_data.get('cpAddress', '')} {receptor_data.get('cpAddress', '')}"
     matched_project_id = find_project_id(address_to_match, project_choices)
     
     doc_obj = None
@@ -96,8 +114,8 @@ def insert_document_logic(db: Session, data: dict, source_file_id: str, appsheet
     doc_obj.doDate = doc_date
     doc_obj.doConsecutive = header.get("doConsecutive")
     doc_obj.doType = header.get("doType")
-    doc_obj.doIssuer = header.get("doIssuerID")
-    doc_obj.doReceptor = header.get("doReceptorID")
+    doc_obj.doIssuer = issuer_id
+    doc_obj.doReceptor = receptor_id
     doc_obj.doAccount = header.get("doAccount")
     doc_obj.CurrencyID = header.get("CurrencyID", "CRC")
     doc_obj.doFile = source_file_id
@@ -195,4 +213,88 @@ def insert_document_logic(db: Session, data: dict, source_file_id: str, appsheet
         "logs": logs,
         "database_id": database_id,
         "matched_project": matched_project_id
+    }
+
+def upsert_company_from_invoice_logic(db: Session, data: dict, source_file_id: str, database_id: str, target_company_id: str = None, update_if_exists: bool = True):
+    if not data:
+        return {"status": "error", "message": "No data extraida"}
+    
+    identification = data.get("cpIdentification", "")
+    if identification:
+        identification = str(identification).strip()
+    name = data.get("cpName", "Empresa Desconocida")
+    if name:
+        name = str(name).strip()
+    
+    company_obj = None
+    
+    # 1. Búsqueda prioritaria por ID provisto por AppSheet
+    if target_company_id:
+        company_obj = db.query(DrCompany).filter(
+            DrCompany.CompanyID == target_company_id,
+            DrCompany.DatabaseID == database_id
+        ).first()
+
+    # 2. Búsqueda por Cédula si no hay ID o no se encontró
+    if not company_obj and identification:
+        company_obj = db.query(DrCompany).filter(
+            DrCompany.cpIdentification == identification,
+            DrCompany.DatabaseID == database_id
+        ).first()
+        
+    # 3. Búsqueda por Nombre como última opción
+    if not company_obj:
+        if name and name != "Empresa Desconocida":
+            company_obj = db.query(DrCompany).filter(
+                DrCompany.cpName.ilike(f"%{name}%"),
+                DrCompany.DatabaseID == database_id
+            ).first()
+
+    is_new = False
+    if not company_obj:
+        company_id = str(uuid.uuid4())[:8].upper()
+        company_obj = DrCompany(CompanyID=company_id)
+        company_obj.cpCreatedBy = "AI_BOT"
+        db.add(company_obj)
+        is_new = True
+    else:
+        if not update_if_exists:
+            return {
+                "status": "success",
+                "action": "found",
+                "company_id": company_obj.CompanyID,
+                "company_name": company_obj.cpName,
+                "database_id": database_id
+            }
+            
+        company_obj.cpModifiedby = "AI_BOT"
+        company_obj.cpModifiedAt = datetime.now()
+
+    company_obj.DatabaseID = database_id
+    company_obj.cpFile = source_file_id
+    
+    if data.get("cpName"):
+        company_obj.cpName = str(data.get("cpName"))[:200]
+    if data.get("cpTitle"):
+        company_obj.cpTitle = str(data.get("cpTitle"))[:150]
+    if data.get("cpIdentification"):
+        company_obj.cpIdentification = str(data.get("cpIdentification"))[:100]
+    if data.get("cpAddress"):
+        company_obj.cpAddress = str(data.get("cpAddress"))[:500]
+    if data.get("cpEmail"):
+        company_obj.cpEmail = str(data.get("cpEmail"))[:150]
+    if data.get("cpPhone"):
+        company_obj.cpPhone = str(data.get("cpPhone"))[:100]
+        
+    company_obj.cpBot = f"Procesado c/IA. Uso: {data.get('usage', 'N/A')}"
+    
+    db.commit()
+    
+    action = "inserted" if is_new else "updated"
+    return {
+        "status": "success",
+        "action": action,
+        "company_id": company_obj.CompanyID,
+        "company_name": company_obj.cpName,
+        "database_id": database_id
     }
