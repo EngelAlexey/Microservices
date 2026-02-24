@@ -17,8 +17,8 @@ def _load_product_catalog(db: Session, database_id: str):
     all_items = db.query(BcItemLn.ItemLnID, BcItemLn.lnCode, BcItemLn.lnTitle, BcItem.itTitle)\
                   .join(BcItem, BcItemLn.ItemID == BcItem.ItemID)\
                   .filter(BcItemLn.DatabaseID == database_id)\
-                  .filter(BcItemLn.isDeleted == False)\
-                  .filter(BcItem.isDeleted == False).all()
+                  .filter(BcItemLn.isDeleted.isnot(True))\
+                  .filter(BcItem.isDeleted.isnot(True)).all()
     
     sku_map = {}
     choices_map = {}
