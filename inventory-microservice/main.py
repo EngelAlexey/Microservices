@@ -24,6 +24,7 @@ class FilePayload(BaseModel):
     doc_id: str = None
     database_id: str
     company_id: str = None
+    image_folder_id: str = None
 
 @app.get("/")
 def read_root():
@@ -72,7 +73,14 @@ async def process_drive_file(payload: FilePayload, db: Session = Depends(get_db)
 
     t3 = time.time()
     try:
-        result = insert_document_logic(db, data, source_file_id=file_id, appsheet_doc_id=payload.doc_id, database_id=payload.database_id)
+        result = insert_document_logic(
+            db, 
+            data, 
+            source_file_id=file_id, 
+            appsheet_doc_id=payload.doc_id, 
+            database_id=payload.database_id,
+            image_folder_id=payload.image_folder_id
+        )
         logger.info(f"⏱️ Paso 4 - DB Insert: {time.time() - t3:.2f}s")
         
         total_time = time.time() - request_start

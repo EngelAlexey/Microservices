@@ -1,11 +1,40 @@
 from sqlalchemy.orm import Session
 from models import BcItem, BcItemLn, FnDocument, FnDocumentLn, IcMovement, IcPrice, DrProject, DrCompany
-from thefuzz import process, fuzz
+import difflib
 import uuid
 from datetime import datetime
 import logging
+from image_services import search_product_image
+from drive_services import upload_image_to_drive, get_folder_path_from_drive
+import threading
 
 logger = logging.getLogger(__name__)
+
+def fetch_and_upload_image_task(query: str, filename: str, folder_id: str):
+    """Tarea en background para descargar y subir a Drive sin bloquear el request"""
+    try:
+        print(f"\n[BACKGROUND_TASK] Iniciando para: {query}")
+        logger.info(f"Hilo Background: Buscando imagen para [{query}]...")
+        img_bytes, img_type, img_ext = search_product_image(query)
+        
+        if img_bytes:
+            print(f"[BACKGROUND_TASK] Imagen obtenida ({len(img_bytes)} bytes). Subiendo a Drive...")
+            # Subimos manteniendo el nombre 'filename' impuesto por la DB
+            uploaded_url = upload_image_to_drive(img_bytes, filename, img_type, folder_id)
+            if uploaded_url:
+                print(f"[BACKGROUND_TASK] ¡EXITO! Imagen subida: {uploaded_url}")
+                logger.info(f"Hilo Background: OK. Imagen guardada como {filename} en Drive.")
+            else:
+                print(f"[BACKGROUND_TASK] ERROR: La subida a Drive falló.")
+                logger.error(f"Hilo Background: Falló la subida a Drive para {filename}")
+        else:
+            print(f"[BACKGROUND_TASK] ADVERTENCIA: No se encontró imagen para '{query}'.")
+            logger.warning(f"Hilo Background: No se encontró imagen para {query}")
+    except Exception as e:
+        print(f"[BACKGROUND_TASK] CRASH CRITICO: {e}")
+        import traceback
+        traceback.print_exc()
+        logger.error(f"Error en Hilo Background Imagen: {e}")
 
 def _load_product_catalog(db: Session, database_id: str):
     """Carga el catálogo de productos por DatabaseID.
@@ -14,7 +43,7 @@ def _load_product_catalog(db: Session, database_id: str):
     para obtener lnCode (SKU) y nombres.
     Retorna ItemLnID (variante) para diferenciar presentaciones en inventario.
     """
-    all_items = db.query(BcItemLn.ItemLnID, BcItemLn.lnCode, BcItemLn.lnTitle, BcItem.itTitle)\
+    all_items = db.query(BcItemLn.ItemLnID, BcItemLn.lnCode, BcItemLn.lnTitle, BcItem.itTitle, BcItem.ItemID)\
                   .join(BcItem, BcItemLn.ItemID == BcItem.ItemID)\
                   .filter(BcItemLn.DatabaseID == database_id)\
                   .filter(BcItemLn.isDeleted.isnot(True))\
@@ -22,6 +51,7 @@ def _load_product_catalog(db: Session, database_id: str):
     
     sku_map = {}
     choices_map = {}
+    parent_map = {} # Mapeo de itTitle -> ItemID para productos maestros
     for item in all_items:
         if item.lnCode:
             sku_map[item.lnCode.strip().upper()] = item.ItemLnID
@@ -29,17 +59,22 @@ def _load_product_catalog(db: Session, database_id: str):
         title = item.itTitle or item.lnTitle
         if title and title not in choices_map:
             choices_map[title] = item.ItemLnID
-    return sku_map, choices_map
+            
+        # Mapear el producto padre para reuso de jerarquía
+        if item.itTitle and item.itTitle not in parent_map:
+            parent_map[item.itTitle] = item.ItemID
+    return sku_map, choices_map, parent_map
 
 def find_product_id(sku: str, description: str, sku_map: dict, choices_map: dict):
     """Busca el ItemLnID priorizando Fuzzy Match por descripción sobre SKU."""
     # 1. Intentar por descripción (Fuzzy Match) - Prioridad Alta
     if choices_map and description:
-        best = process.extractOne(description, choices_map.keys(), scorer=fuzz.token_sort_ratio)
-        if best and best[1] >= 80:
-            return choices_map[best[0]], f"Fuzzy {best[1]}%"
-    
-    # 2. Fallback: Intentar por SKU exacto
+        keys = list(choices_map.keys())
+        matches = difflib.get_close_matches(str(description).strip(), keys, n=1, cutoff=0.8)
+        if matches:
+            return choices_map[matches[0]], f"Fuzzy Name ({matches[0][:20]})"
+            
+    # 2. Intentar buscar por SKU si la descripción no dió un match seguro:
     if sku:
         clean_sku = sku.strip().upper()
         if clean_sku in sku_map:
@@ -59,19 +94,20 @@ def _load_project_catalog(db: Session, database_id: str):
     return project_choices
 
 def find_project_id(address_text: str, project_choices: dict):
-    if not address_text or not project_choices:
+    if not address_text or not str(address_text).strip() or not project_choices:
         return None
-    # Usamos partial_ratio para proyectos porque las direcciones suelen ser largas y contener el nombre
-    best = process.extractOne(address_text, project_choices.keys(), scorer=fuzz.partial_ratio)
-    if best and best[1] >= 75: 
-        return project_choices[best[0]]
+    # Usamos difflib nativo para evitar crashes de Rust en Windows
+    keys = list(project_choices.keys())
+    matches = difflib.get_close_matches(str(address_text).strip(), keys, n=1, cutoff=0.75)
+    if matches:
+        return project_choices[matches[0]]
     return None
 
-def insert_document_logic(db: Session, data: dict, source_file_id: str, appsheet_doc_id: str = None, database_id: str = "BBJ"):
+def insert_document_logic(db: Session, data: dict, source_file_id: str, appsheet_doc_id: str = None, database_id: str = "BBJ", image_folder_id: str = None):
     header = data.get("header", {})
     lines = data.get("lines", [])
     
-    sku_map, choices_map = _load_product_catalog(db, database_id)
+    sku_map, choices_map, parent_map = _load_product_catalog(db, database_id)
     project_choices = _load_project_catalog(db, database_id)
     
     issuer_data = header.get("issuer", {})
@@ -135,12 +171,97 @@ def insert_document_logic(db: Session, data: dict, source_file_id: str, appsheet
             choices_map=choices_map
         )
         
+        is_found = match_type != "Raw SKU"
+        
         qty = float(line.get("quantity", 0))
         price_unit = float(line.get("unit_price", 0))
         total_line = float(line.get("total", (qty * price_unit))) 
 
-        ln_uuid = str(uuid.uuid4())
-        ln_id_short = ln_uuid[:8].upper() 
+        ln_uuid = str(uuid.uuid4()).replace('-', '')[:10].upper()
+        
+        if not is_found and clean_supply_id != "UNKNOWN":
+            # 1. Intentar buscar un producto PADRE existente antes de crear uno nuevo
+            product_name = str(line.get("product_name") or line.get("description") or "Producto Nuevo").strip()
+            item_id = None
+            
+            if parent_map:
+                p_keys = list(parent_map.keys())
+                p_matches = difflib.get_close_matches(product_name, p_keys, n=1, cutoff=0.85)
+                if p_matches:
+                    item_id = parent_map[p_matches[0]]
+                    logger.info(f"Línea {line_number}: Asociando a producto maestro existente: {p_matches[0]} ({item_id})")
+
+            # 2. Si no hay padre, crearlo
+            if not item_id:
+                item_id = str(uuid.uuid4()).replace('-', '')[:10].upper()
+                
+                image_path = None
+                product_desc = str(line.get("description") or "")
+                if image_folder_id and product_desc:
+                    # AppSheet Format: "Kaizen/A14-Bodegas Benjamin/Items/0895E257F3.itImage.163806.png"
+                    time_code = datetime.now().strftime("%H%M%S")
+                    filename = f"{item_id}.itImage.{time_code}.png"
+                    
+                    # Armamos la ruta completa dinámicamente usando el nombre de la carpeta de Drive
+                    resolved_folder_path = get_folder_path_from_drive(image_folder_id)
+                    image_path = f"{resolved_folder_path}{filename}"
+                    
+                    # Lanzar el hilo en background para descargar y subir a Drive
+                    threading.Thread(
+                        target=fetch_and_upload_image_task, 
+                        args=(product_desc, filename, image_folder_id),
+                        daemon=True
+                    ).start()
+
+                new_bc_item = BcItem(
+                    ItemID=item_id,
+                    DatabaseID=database_id,
+                    itTitle=product_name[:300],
+                    itDescription=product_desc,
+                    CabysID=str(line.get("cabys_candidate") or "")[:20] if line.get("cabys_candidate") else None,
+                    itImage=image_path,
+                    itStatus=True,
+                    itCreatedBy="AI_BOT",
+                    Bot=f"Auto-creado por factura {doc_obj.doConsecutive}"
+                )
+                db.add(new_bc_item)
+                # Agregamos al mapa local para evitar duplicados en la misma factura si vienen varias líneas del mismo padre
+                parent_map[product_name] = item_id
+            
+            # 3. Crear la variante (Hijo)
+            clean_supply_id = str(uuid.uuid4()).replace('-', '')[:10].upper()
+            
+            new_bc_item_ln = BcItemLn(
+                ItemLnID=clean_supply_id,
+                ItemID=item_id,
+                DatabaseID=database_id,
+                lnCode=str(line.get("sku_candidate") or "SIN-CODIGO")[:50],
+                lnTitle=str(line.get("variant_name") or line.get("description") or "Producto Nuevo")[:150],
+                lnSize=str(line.get("size"))[:100] if line.get("size") else None,
+                lnQuantity=qty,
+                lnAvailable=qty,
+                lnStatus=True,
+                lnCreatedBy="AI_BOT",
+                Bot=f"Auto-creado por factura {doc_obj.doConsecutive}"
+            )
+            db.add(new_bc_item_ln)
+            
+            if line.get("sku_candidate"):
+                sku_map[str(line.get("sku_candidate")).strip().upper()] = clean_supply_id
+                
+            logs.append(f"Línea {line_number}: Producto nuevo {clean_supply_id} creado.")
+            
+        elif is_found:
+            existing_ln = db.query(BcItemLn).filter(
+                BcItemLn.ItemLnID == clean_supply_id,
+                BcItemLn.DatabaseID == database_id
+            ).first()
+            if existing_ln:
+                existing_ln.lnQuantity = (float(existing_ln.lnQuantity) if existing_ln.lnQuantity else 0.0) + qty
+                existing_ln.lnAvailable = (float(existing_ln.lnAvailable) if existing_ln.lnAvailable else 0.0) + qty
+                existing_ln.lnModifiedBy = "AI_BOT"
+                existing_ln.lnModifiedAt = datetime.now()
+            logs.append(f"Línea {line_number}: Stock de {clean_supply_id} actualizado.")
         
         new_ln = FnDocumentLn(
             DocumentLnID=ln_uuid,
@@ -158,7 +279,7 @@ def insert_document_logic(db: Session, data: dict, source_file_id: str, appsheet
 
         if clean_supply_id and clean_supply_id != "UNKNOWN":
             
-            mv_id = str(uuid.uuid4())[:8].upper()
+            mv_id = str(uuid.uuid4()).replace('-', '')[:10].upper()
             
             # Truncate values to fit varchar(10) in auxiliary tables
             truncated_origin = (doc_obj.doIssuer or "")[:10]
@@ -174,13 +295,13 @@ def insert_document_logic(db: Session, data: dict, source_file_id: str, appsheet
                 mvDate=doc_date,
                 mvAction="IN",        
                 mvQuantity=qty,
-                mvStatus="Applied",
+                mvStatus="POSTED",
                 mvNotes=f"Auto-generado por Factura {doc_obj.doConsecutive}",
                 mvCreatedby="AI_BOT"
             )
             db.add(new_movement)
             
-            pr_id = str(uuid.uuid4())[:8].upper()
+            pr_id = str(uuid.uuid4()).replace('-', '')[:10].upper()
             
             new_price = IcPrice(
                 PriceID=pr_id,
@@ -188,7 +309,7 @@ def insert_document_logic(db: Session, data: dict, source_file_id: str, appsheet
                 ItemID=truncated_item,
                 ProjectID=None, 
                 MovementID=mv_id,         
-                prTitle=f"Lote Fac {doc_obj.doConsecutive}",
+                prTitle="Ingreso",
                 prDescription=line.get("description"),
                 prQuantity=qty,
                 prPrice=price_unit,
@@ -215,17 +336,20 @@ def insert_document_logic(db: Session, data: dict, source_file_id: str, appsheet
         "matched_project": matched_project_id
     }
 
-def upsert_company_from_invoice_logic(db: Session, data: dict, source_file_id: str, database_id: str, target_company_id: str = None, update_if_exists: bool = True):
-    if not data:
-        return {"status": "error", "message": "No data extraida"}
+def upsert_company_from_invoice_logic(db: Session, data: dict, source_file_id: str, database_id: str = "BBJ", target_company_id: str = None, update_if_exists: bool = True):
+    """
+    Extracted logic to process company details (Issuer or Receptor).
+    Checks for duplicates in DrCompanies by tax ID.
+    If target_company_id is provided, updates that exact record.
+    Returns a dict with status & company_id.
+    """
     
-    identification = data.get("cpIdentification", "")
-    if identification:
-        identification = str(identification).strip()
-    name = data.get("cpName", "Empresa Desconocida")
-    if name:
-        name = str(name).strip()
+    cp_identification = str(data.get("cpIdentification", "")).strip()
+    cp_name = str(data.get("cpName") or "").strip()
     
+    if not cp_name and not cp_identification:
+        return {"status": "skipped", "reason": "No name or ID provided"}
+        
     company_obj = None
     
     # 1. Búsqueda prioritaria por ID provisto por AppSheet
@@ -236,19 +360,18 @@ def upsert_company_from_invoice_logic(db: Session, data: dict, source_file_id: s
         ).first()
 
     # 2. Búsqueda por Cédula si no hay ID o no se encontró
-    if not company_obj and identification:
+    if not company_obj and cp_identification:
         company_obj = db.query(DrCompany).filter(
-            DrCompany.cpIdentification == identification,
+            DrCompany.cpIdentification == cp_identification,
             DrCompany.DatabaseID == database_id
         ).first()
         
-    # 3. Búsqueda por Nombre como última opción
-    if not company_obj:
-        if name and name != "Empresa Desconocida":
-            company_obj = db.query(DrCompany).filter(
-                DrCompany.cpName.ilike(f"%{name}%"),
-                DrCompany.DatabaseID == database_id
-            ).first()
+    # If strictly needed, fallbacks to exact textual match on cpName
+    if not company_obj and cp_name:
+        company_obj = db.query(DrCompany).filter(
+            DrCompany.cpName == cp_name,
+            DrCompany.DatabaseID == database_id
+        ).first()
 
     is_new = False
     if not company_obj:

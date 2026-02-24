@@ -13,7 +13,6 @@ class BcItem(Base):
     itTitle = Column(String(300))
     itDescription = Column(Text)
     itBrand = Column(String(20))
-    itCertification = Column(String(45))
     CabysID = Column(String(20))
     itObservations = Column(Text)
     itStatus = Column(Boolean, default=True)

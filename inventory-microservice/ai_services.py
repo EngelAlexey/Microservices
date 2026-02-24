@@ -39,7 +39,10 @@ Return JSON:
         { 
             "sku_candidate": "string",
             "cabys_candidate": "string",
-            "description": "string", 
+            "description": "string - Full original description",
+            "product_name": "string - Generic product name (e.g. 'Coca Cola Zero', 'Giffard Pineapple')",
+            "variant_name": "string - Specific variant name (e.g. 'Coca Cola Zero')",
+            "size": "string or null - Size or weight (e.g. '2L', '750 ml')",
             "quantity": 0.0, 
             "unit_price": 0.0,
             "discount_amount": 0.0,
