@@ -112,7 +112,7 @@ class IcMovement(Base):
     OriginID = Column(String(10))     
     ProjectID = Column(String(10), nullable=True)
     ItemID = Column(String(10))       
-    DocumentLnID = Column(String(10)) 
+    DocumentLnID = Column(String(100))
     mvDate = Column(DateTime, default=datetime.datetime.now)
     mvAction = Column(String(10))     
     mvQuantity = Column(DECIMAL(13, 2))

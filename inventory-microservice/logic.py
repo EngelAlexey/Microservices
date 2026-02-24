@@ -170,7 +170,7 @@ def insert_document_logic(db: Session, data: dict, source_file_id: str, appsheet
                 OriginID=truncated_origin,
                 ProjectID=None, 
                 ItemID=truncated_item,
-                DocumentLnID=ln_id_short, 
+                DocumentLnID=(line.get("description") or ""), 
                 mvDate=doc_date,
                 mvAction="IN",        
                 mvQuantity=qty,
