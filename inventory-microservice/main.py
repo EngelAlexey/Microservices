@@ -37,12 +37,14 @@ def read_root():
     return {"status": "System Online", "version": "5.0.0 (Strict 2-Step Flow)"}
 
 def _check_duplicate(file_id: str, database_id: str):
-    """Verifica duplicados filtrando por archivo y base de datos."""
+    """Verifica que el documento YA FUE PROCESADO (tiene doConsecutive).
+    Si solo existe la fila shell creada por AppSheet (NULL fields), no se considera duplicado."""
     db = SessionLocal()
     try:
         result = db.query(FnDocument).filter(
             FnDocument.doFile == file_id,
-            FnDocument.DatabaseID == database_id
+            FnDocument.DatabaseID == database_id,
+            FnDocument.doConsecutive.isnot(None)  # Solo si ya fue procesado realmente
         ).first()
         return result
     finally:
