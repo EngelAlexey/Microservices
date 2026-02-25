@@ -32,11 +32,14 @@ class FilePayload(BaseModel):
 def read_root():
     return {"status": "System Online", "version": "3.1.1 (Production Ready)"}
 
-def _check_duplicate(file_id: str):
-    """Verifica duplicados en un hilo separado con su propia sesión DB."""
+def _check_duplicate(file_id: str, database_id: str):
+    """Verifica duplicados en un hilo separado filtrando por archivo y base de datos."""
     db = SessionLocal()
     try:
-        result = db.query(FnDocument).filter(FnDocument.doFile == file_id).first()
+        result = db.query(FnDocument).filter(
+            FnDocument.doFile == file_id,
+            FnDocument.DatabaseID == database_id
+        ).first()
         return result
     finally:
         db.close()
@@ -44,13 +47,14 @@ def _check_duplicate(file_id: str):
 @app.post("/webhook/process-drive-file")
 async def process_drive_file(payload: FilePayload, db: Session = Depends(get_db)):
     file_id = payload.file_id
+    db_id = payload.database_id
     request_start = time.time()
-    logger.info(f"Procesando archivo ID: {file_id}")
+    logger.info(f"Procesando archivo ID: {file_id} (Client: {db_id})")
 
     t0 = time.time()
     loop = asyncio.get_event_loop()
     
-    dup_future = loop.run_in_executor(_executor, _check_duplicate, file_id)
+    dup_future = loop.run_in_executor(_executor, _check_duplicate, file_id, db_id)
     drive_future = loop.run_in_executor(_executor, download_with_validation, file_id)
     
     exists, (content, meta) = await asyncio.gather(dup_future, drive_future)

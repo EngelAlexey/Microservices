@@ -116,7 +116,7 @@ def find_project_id(address_text: str, project_choices: dict):
         return project_choices[matches[0]]
     return None
 
-def insert_document_logic(db: Session, data: dict, source_file_id: str, appsheet_doc_id: str = None, database_id: str = "BBJ", image_folder_id: str = None):
+def insert_document_logic(db: Session, data: dict, source_file_id: str, appsheet_doc_id: str = None, database_id: str = None, image_folder_id: str = None):
     # Truncate database_id to fit varchar(10)
     database_id = (database_id or "")[:10]
     
@@ -371,7 +371,7 @@ def insert_document_logic(db: Session, data: dict, source_file_id: str, appsheet
         "matched_project": matched_project_id
     }
 
-def upsert_company_from_invoice_logic(db: Session, data: dict, source_file_id: str, database_id: str = "BBJ", target_company_id: str = None, update_if_exists: bool = True):
+def upsert_company_from_invoice_logic(db: Session, data: dict, source_file_id: str, database_id: str = None, target_company_id: str = None, update_if_exists: bool = True):
     """
     Extracted logic to process company details (Issuer or Receptor).
     Checks for duplicates in DrCompanies by tax ID.
