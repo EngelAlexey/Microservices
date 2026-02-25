@@ -283,6 +283,17 @@ def create_inventory_movements_logic(db: Session, document_id: str, database_id:
                 )
                 db.add(new_bc_item)
                 logger.info(f"Nuevo Maestro Creado: {item_id} ({product_hint or ln.dlDescription[:30]})")
+                
+                # Disparar descarga de imagen en background
+                if image_folder_id:
+                    img_query = product_hint or ln.dlDescription[:60]
+                    img_filename = f"{item_id}.jpg"
+                    t = threading.Thread(
+                        target=fetch_and_upload_image_task,
+                        args=(img_query, img_filename, image_folder_id, item_id),
+                        daemon=True
+                    )
+                    t.start()
 
             # 3. Crear Variante (BcItemLn)
             final_supply_id = str(uuid.uuid4()).replace('-', '')[:8].upper()
