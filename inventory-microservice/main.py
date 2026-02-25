@@ -30,6 +30,7 @@ class MovementPayload(BaseModel):
     document_id: str
     database_id: str
     image_folder_id: str = None
+    project_id: str = None
 
 @app.get("/")
 def read_root():
@@ -86,7 +87,9 @@ async def create_movements(payload: MovementPayload, db: Session = Depends(get_d
         img_folder = payload.image_folder_id or os.environ.get("DEFAULT_IMAGE_FOLDER_ID")
         
         result = create_inventory_movements_logic(
-            db, payload.document_id, payload.database_id, image_folder_id=img_folder
+            db, payload.document_id, payload.database_id, 
+            image_folder_id=img_folder,
+            project_id=payload.project_id
         )
         return {"status": "success", "result": result}
     except Exception as e:

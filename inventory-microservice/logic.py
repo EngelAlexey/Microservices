@@ -224,7 +224,7 @@ def insert_document_logic(db: Session, data: dict, source_file_id: str, appsheet
     db.commit()
     return {"status": "success", "document_id": doc_obj.DocumentID}
 
-def create_inventory_movements_logic(db: Session, document_id: str, database_id: str, image_folder_id: str = None):
+def create_inventory_movements_logic(db: Session, document_id: str, database_id: str, image_folder_id: str = None, project_id: str = None):
     """PASO 2: Procesamiento de Inventario con Jerarquía Maestro-Variante.
     1. Busca variante exacta.
     2. Si no hay variante, busca artículo maestro (BcItem).
@@ -316,6 +316,7 @@ def create_inventory_movements_logic(db: Session, document_id: str, database_id:
             MovementID=mv_id,
             DatabaseID=database_id,
             OriginID=(doc.IssuerID or "")[:10],
+            ProjectID=(project_id or "")[:10] or None,
             ItemID=(final_supply_id or "")[:10],
             DocumentLnID=ln.DocumentLnID,
             mvDate=doc.doDate or datetime.now(),
@@ -332,7 +333,8 @@ def create_inventory_movements_logic(db: Session, document_id: str, database_id:
             PriceID=pr_id,
             DatabaseID=database_id,
             ItemID=(final_supply_id or "")[:10],
-            MovementID=mv_id,         
+            MovementID=mv_id,
+            ProjectID=(project_id or "")[:10] or None,
             prTitle="Ingreso",
             prDescription=(ln.dlDescription or "")[:255],
             prQuantity=ln.dlQuantity,
