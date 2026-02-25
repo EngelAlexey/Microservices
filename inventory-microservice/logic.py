@@ -290,7 +290,7 @@ def create_inventory_movements_logic(db: Session, document_id: str, database_id:
                 ItemLnID=final_supply_id,
                 ItemID=item_id,
                 DatabaseID=database_id,
-                lnCode="AUTO",
+                lnCode=final_supply_id,  # Unique code per variant to avoid duplicate key constraint
                 lnTitle=ln.dlDescription[:150],
                 lnQuantity=0, 
                 lnAvailable=0,
