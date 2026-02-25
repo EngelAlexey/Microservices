@@ -76,6 +76,7 @@ class FnDocument(Base):
     doTotal = Column(DECIMAL(13, 2))
     
     doStatus = Column(String(64), default="NEW")
+    doCredit = Column(String(64), nullable=True) # Cash, 15 days, 30 days
     doCreatedBy = Column(String(150), default="AI_BOT")
     doCreatedAt = Column(DateTime, default=datetime.datetime.now)
     DriveID = Column(String(2000))      

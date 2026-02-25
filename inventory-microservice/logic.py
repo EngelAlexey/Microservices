@@ -162,11 +162,16 @@ def insert_document_logic(db: Session, data: dict, source_file_id: str, appsheet
     doc_obj.doDate = doc_date
     doc_obj.doConsecutive = header.get("doConsecutive")
     doc_obj.doType = header.get("doType")
-    doc_obj.doIssuer = issuer_id
-    doc_obj.IssuerID = issuer_id
-    doc_obj.doReceptor = receptor_id
-    doc_obj.ReceptorID = receptor_id
+    
+    # Mapeo de Compañías
+    doc_obj.IssuerID = (issuer_id or "")[:10]
+    doc_obj.doIssuer = issuer_data.get("cpName") or issuer_data.get("cpTitle") or issuer_id # Nombre para display
+    
+    doc_obj.ReceptorID = (receptor_id or "")[:10]
+    doc_obj.doReceptor = receptor_data.get("cpName") or receptor_data.get("cpTitle") or receptor_id # Nombre para display
+    
     doc_obj.doAccount = header.get("doAccount")
+    doc_obj.doCredit = header.get("doCredit")
     doc_obj.CurrencyID = header.get("CurrencyID", "CRC")
     doc_obj.doSubtotal = header.get("SubtotalAmount", 0.0)
     doc_obj.doTaxes = header.get("TaxAmount", 0.0)

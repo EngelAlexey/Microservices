@@ -10,31 +10,42 @@ _client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 
 _PROMPT = """Extract data from this Costa Rican invoice PDF. Be extremely precise with financial totals and taxes.
 
-Column "Código / Cód. CABYS" stacks SKU (e.g. 'GCP') and CABYS ('2413...'). Separate them.
+Rules for Financial Data:
+1. CurrencyID: Strictly identify if it is USD ($) or CRC (₡). Do not assume. Check the symbols and text (e.g., 'US DOLLAR', '$').
+2. doAccount: Identify the account type. 
+   - If it is a "Factura Electrónica" or "Tiquete", set to "CXC" (Cuenta por Cobrar).
+   - If it is a "Nota de Crédito" or "Factura de Compra", set to "CXP" (Cuenta por Pagar).
+3. doCredit: Identify credit terms. Use formats like: "Cash", "15 days", "30 days", "45 days", "60 days". 
+   - If 'Plazo de crédito' is 0, use "Cash". 
+   - If it is a number like '30', use "30 days".
+
+Column "Código / Cód. CABYS" stacks SKU and CABYS. Separate them.
 
 Return JSON:
 {
     "header": {
         "doConsecutive": "string",
         "doDate": "YYYY-MM-DD",
-        "doType": "FE or NC",
+        "doType": "FE, NC, TE, etc.",
+        "doAccount": "CXC or CXP",
+        "doCredit": "Cash, 30 days, etc.",
         "CurrencyID": "CRC or USD",
         "SubtotalAmount": 0.0,
         "TaxAmount": 0.0,
         "TotalAmount": 0.0,
         "issuer": {
-            "cpName": "string or null - Official legal name",
-            "cpTitle": "string or null - Commercial name",
-            "cpIdentification": "string or null - Tax ID / Corporate ID",
-            "cpAddress": "string or null - Full address",
+            "cpName": "string or null",
+            "cpTitle": "string or null",
+            "cpIdentification": "string or null",
+            "cpAddress": "string or null",
             "cpPhone": "string or null",
             "cpEmail": "string or null"
         },
         "receptor": {
-            "cpName": "string or null - Official legal name",
-            "cpTitle": "string or null - Commercial name",
-            "cpIdentification": "string or null - Tax ID / Corporate ID",
-            "cpAddress": "string or null - Full address",
+            "cpName": "string or null",
+            "cpTitle": "string or null",
+            "cpIdentification": "string or null",
+            "cpAddress": "string or null",
             "cpPhone": "string or null",
             "cpEmail": "string or null"
         }
@@ -43,14 +54,11 @@ Return JSON:
         { 
             "sku_candidate": "string",
             "cabys_candidate": "string",
-            "description": "string - Full original description",
-            "product_name": "string - Generic product name (e.g. 'Coca Cola Zero', 'Giffard Pineapple')",
-            "variant_name": "string - Specific variant name (e.g. 'Coca Cola Zero')",
-            "size": "string or null - Size or weight (e.g. '2L', '750 ml')",
+            "description": "string",
+            "product_name": "string (Generic)",
             "quantity": 0.0, 
             "unit_price": 0.0,
             "subtotal_line": 0.0,
-            "discount_amount": 0.0,
             "tax_amount": 0.0,
             "total_line": 0.0
         }
