@@ -202,8 +202,14 @@ def insert_document_logic(db: Session, data: dict, source_file_id: str, appsheet
                     time_code = datetime.now().strftime("%H%M%S")
                     filename = f"{item_id}.itImage.{time_code}.png"
                     
-                    # Armamos la ruta completa dinámicamente usando el nombre de la carpeta de Drive
+                    # 3. Guardamos la ruta completa para AppSheet
+                    # El usuario indicó que debe empezar desde la raíz: "03-Aplicaciones/..."
                     resolved_folder_path = get_folder_path_from_drive(image_folder_id)
+                    
+                    # Si el Service Account no ve la raíz del Shared Drive, la forzamos
+                    if resolved_folder_path and not resolved_folder_path.startswith("03-Aplicaciones"):
+                        resolved_folder_path = f"03-Aplicaciones/{resolved_folder_path}"
+                    
                     image_path = f"{resolved_folder_path}{filename}"
                     
                     # Lanzar el hilo en background para descargar y subir a Drive
