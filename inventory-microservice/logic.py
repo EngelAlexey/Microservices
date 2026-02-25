@@ -194,7 +194,8 @@ def insert_document_logic(db: Session, data: dict, source_file_id: str, appsheet
         
         qty = float(line.get("quantity", 0))
         price_unit = float(line.get("unit_price", 0))
-        subtotal_ln = float(line.get("subtotal_line", 0) or (qty * price_unit))
+        discount_ln = float(line.get("discount_amount", 0))
+        subtotal_ln = float(line.get("subtotal_line", 0) or ((qty * price_unit) - discount_ln))
         tax_ln = float(line.get("tax_amount", 0))
         total_ln = float(line.get("total_line", 0) or (subtotal_ln + tax_ln))
         
@@ -210,6 +211,7 @@ def insert_document_logic(db: Session, data: dict, source_file_id: str, appsheet
             dlDescription=manual_desc,
             dlQuantity=qty,
             dlUnitPrice=price_unit,
+            dlDiscount=discount_ln,
             dlSubtotal=subtotal_ln,
             dlTaxes=tax_ln,
             dlTotal=total_ln,

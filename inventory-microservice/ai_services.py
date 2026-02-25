@@ -58,6 +58,7 @@ Return JSON:
             "product_name": "string (Generic)",
             "quantity": 0.0, 
             "unit_price": 0.0,
+            "discount_amount": 0.0,
             "subtotal_line": 0.0,
             "tax_amount": 0.0,
             "total_line": 0.0
