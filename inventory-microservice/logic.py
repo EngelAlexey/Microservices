@@ -165,10 +165,7 @@ def insert_document_logic(db: Session, data: dict, source_file_id: str, appsheet
     
     # Mapeo de Compañías
     doc_obj.IssuerID = (issuer_id or "")[:10]
-    doc_obj.doIssuer = issuer_data.get("cpName") or issuer_data.get("cpTitle") or issuer_id # Nombre para display
-    
     doc_obj.ReceptorID = (receptor_id or "")[:10]
-    doc_obj.doReceptor = receptor_data.get("cpName") or receptor_data.get("cpTitle") or receptor_id # Nombre para display
     
     doc_obj.doAccount = header.get("doAccount")
     doc_obj.doCredit = header.get("doCredit")

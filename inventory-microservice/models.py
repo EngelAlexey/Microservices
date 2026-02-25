@@ -65,9 +65,7 @@ class FnDocument(Base):
     doTitle = Column(Text, nullable=True)
     doConsecutive = Column(String(2000))
     
-    doIssuer = Column(String(2000))     
     IssuerID = Column(String(10), nullable=True)
-    doReceptor = Column(String(64))     
     ReceptorID = Column(String(10), nullable=True)
     
     CurrencyID = Column(String(64), default="CRC")
