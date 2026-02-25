@@ -11,7 +11,7 @@ from database import get_db, engine, Base, SessionLocal
 from models import FnDocument 
 from ai_services import extract_invoice_data, extract_company_data
 from logic import insert_document_logic, upsert_company_from_invoice_logic
-from drive_services import download_with_validation
+from drive_services import download_with_validation, resolve_file_id
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -57,7 +57,11 @@ async def process_drive_file(payload: FilePayload, db: Session = Depends(get_db)
     db_id = payload.database_id
     logger.info(f"Digitalizando Factura: {file_id} (Client: {db_id})")
 
+    # Resolver ruta de AppSheet a Drive ID real si es necesario
     loop = asyncio.get_event_loop()
+    file_id = await loop.run_in_executor(_executor, resolve_file_id, file_id)
+    logger.info(f"Drive ID resuelto: {file_id}")
+
     # Verificar duplicado
     exists = await loop.run_in_executor(_executor, _check_duplicate, file_id, db_id)
     if exists:

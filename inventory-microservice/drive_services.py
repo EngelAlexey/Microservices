@@ -46,6 +46,46 @@ def get_drive_service(impersonate_user: str = None):
         logger.error(f"Error cargando credenciales desde {creds_file}: {e}")
         return None
 
+def resolve_file_id(file_id_or_path: str) -> str:
+    """
+    Si file_id_or_path parece una ruta de AppSheet (contiene '/'),
+    busca el archivo en Drive por nombre y retorna su ID real.
+    De lo contrario retorna el file_id tal cual.
+    """
+    if not file_id_or_path or '/' not in file_id_or_path:
+        return file_id_or_path  # Ya es un Drive ID real
+    
+    # Es una ruta de AppSheet estilo /Documents/filename.pdf
+    filename = file_id_or_path.strip('/').split('/')[-1]
+    logger.info(f"Resolviendo ruta AppSheet '{file_id_or_path}' -> buscando '{filename}' en Drive...")
+    
+    try:
+        service = get_drive_service()
+        if not service:
+            return file_id_or_path
+        
+        # Buscar por nombre exacto en todos los drives
+        query = f"name = '{filename}' and trashed = false"
+        results = service.files().list(
+            q=query,
+            fields="files(id, name)",
+            supportsAllDrives=True,
+            includeItemsFromAllDrives=True,
+            pageSize=5
+        ).execute()
+        
+        files = results.get('files', [])
+        if files:
+            real_id = files[0]['id']
+            logger.info(f"Archivo encontrado en Drive: {real_id} ({filename})")
+            return real_id
+        else:
+            logger.error(f"No se encontró '{filename}' en Drive.")
+            return file_id_or_path  # Retornar original para que falle con error claro
+    except Exception as e:
+        logger.error(f"Error resolviendo ruta de Drive: {e}")
+        return file_id_or_path
+
 def download_with_validation(file_id):
     """
     Returns:
