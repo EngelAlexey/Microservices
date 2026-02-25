@@ -116,7 +116,7 @@ def find_project_id(address_text: str, project_choices: dict):
         return project_choices[matches[0]]
     return None
 
-def insert_document_logic(db: Session, data: dict, source_file_id: str, appsheet_doc_id: str = None, database_id: str = None, image_folder_id: str = None):
+def insert_document_logic(db: Session, data: dict, source_file_id: str, appsheet_doc_id: str = None, database_id: str = None, image_folder_id: str = None, create_movements: bool = True):
     # Truncate database_id to fit varchar(10)
     database_id = (database_id or "")[:10]
     
@@ -153,12 +153,16 @@ def insert_document_logic(db: Session, data: dict, source_file_id: str, appsheet
         doc_obj = db.query(FnDocument).filter(FnDocument.DocumentID == appsheet_doc_id).first()
     
     if not doc_obj:
-        doc_id = (str(appsheet_doc_id)[:10]) if appsheet_doc_id else str(uuid.uuid4())[:8].upper()
+        doc_id = (str(appsheet_doc_id)[:150]) if appsheet_doc_id else str(uuid.uuid4())[:8].upper()
         doc_obj = FnDocument(DocumentID=doc_id)
         db.add(doc_obj)
     
     try:
-        doc_date = datetime.strptime(header.get("doDate"), "%Y-%m-%d").date()
+        doc_date_str = header.get("doDate")
+        if doc_date_str:
+            doc_date = datetime.strptime(doc_date_str, "%Y-%m-%d").date()
+        else:
+            doc_date = datetime.now().date()
     except:
         doc_date = datetime.now().date()
 
@@ -167,18 +171,26 @@ def insert_document_logic(db: Session, data: dict, source_file_id: str, appsheet
     doc_obj.doConsecutive = header.get("doConsecutive")
     doc_obj.doType = header.get("doType")
     doc_obj.doIssuer = issuer_id
+    doc_obj.IssuerID = issuer_id
     doc_obj.doReceptor = receptor_id
+    doc_obj.ReceptorID = receptor_id
     doc_obj.doAccount = header.get("doAccount")
     doc_obj.CurrencyID = header.get("CurrencyID", "CRC")
+    doc_obj.doSubtotal = header.get("SubtotalAmount", 0.0)
+    doc_obj.doTaxes = header.get("TaxAmount", 0.0)
+    doc_obj.doTotal = header.get("TotalAmount", 0.0)
     doc_obj.doFile = source_file_id
     doc_obj.DriveID = source_file_id
     doc_obj.doStatus = "PROCESSED_BY_AI"
-    doc_obj.Bot = f"Procesado c/Proyecto: {matched_project_id or 'N/A'}. Uso IA: {data.get('usage', 'N/A')}"
+    doc_obj.Bot = f"Step: Digitized. Project: {matched_project_id or 'N/A'}. IA: {data.get('usage', 'N/A')}"
 
     logs = []
-    total_doc = 0
     line_number = 1
     
+    # Clean previous lines if re-processing
+    if appsheet_doc_id:
+        db.query(FnDocumentLn).filter(FnDocumentLn.DocumentID == appsheet_doc_id).delete()
+
     for line in lines:
         clean_supply_id, match_type = find_product_id(
             sku=line.get("sku_candidate"), 
@@ -188,13 +200,14 @@ def insert_document_logic(db: Session, data: dict, source_file_id: str, appsheet
         )
         
         is_found = match_type != "Raw SKU"
-        
         qty = float(line.get("quantity", 0))
         price_unit = float(line.get("unit_price", 0))
-        total_line = float(line.get("total", (qty * price_unit))) 
+        subtotal_ln = float(line.get("subtotal_line", 0) or (qty * price_unit))
+        tax_ln = float(line.get("tax_amount", 0))
+        total_ln = float(line.get("total_line", 0) or (subtotal_ln + tax_ln))
+        
         ln_uuid = str(uuid.uuid4()).replace('-', '')[:8].upper()
 
-        # 1. Determinamos el MASTER PRODUCT (parent) y si ya tiene imagen
         product_name = str(line.get("product_name") or line.get("description") or "Producto").strip()
         product_desc = str(line.get("description") or "")
         item_id = None
@@ -213,42 +226,26 @@ def insert_document_logic(db: Session, data: dict, source_file_id: str, appsheet
                     meta = parent_map[p_matches[0]]
                     item_id = meta["parent_id"]
                     existing_drive_id = meta["drive_id"]
-                    logger.info(f"Línea {line_number}: Asociando a producto maestro existente por nombre: {p_matches[0]} ({item_id})")
 
-        # 2. Lógica de IMAGEN (Infalible y Optimizada)
-        search_query = f"{product_name} {product_desc}".strip()
-        # Filtro de términos genéricos para evitar imágenes erróneas
-        blacklist = ["GENERAL", "MISC", "PRODUCTO", "SERVICIO", "VARIOS", "LINEA", "ARTICULO", "SIN NOMBRE"]
-        is_generic = any(term in search_query.upper() for term in blacklist) or len(search_query) < 3
-        
-        # SIEMPRE asegurar que tenemos item_id si es producto nuevo
         if not item_id:
             item_id = str(uuid.uuid4()).replace('-', '')[:8].upper()
 
         image_path = None
-        # Solo disparamos búsqueda si no existe imagen Y no es genérico
-        if not existing_drive_id and image_folder_id and not is_generic:
+        if not existing_drive_id and image_folder_id:
             time_code = datetime.now().strftime("%H%M%S")
             filename = f"{item_id}.itImage.{time_code}.png"
-            
-            # Guardamos ruta teórica para AppSheet
             resolved_folder_path = get_folder_path_from_drive(image_folder_id)
             if resolved_folder_path and not resolved_folder_path.startswith("03-Aplicaciones"):
                 resolved_folder_path = f"03-Aplicaciones/{resolved_folder_path}"
             image_path = f"{resolved_folder_path}{filename}"
-
-            # Disparar búsqueda real en background
             threading.Thread(
                 target=fetch_and_upload_image_task, 
-                args=(search_query, filename, image_folder_id, item_id),
+                args=(f"{product_name} {product_desc}", filename, image_folder_id, item_id),
                 daemon=True
             ).start()
 
-        # 3. CREACIÓN o ACTUALIZACIÓN del Producto Maestro
-        if not is_found and not any(meta.get("parent_id") == item_id for meta in variant_map.values() if item_id):
-            # Solo creamos el maestro si no existe en el catálogo cargado
-            # (Verificamos si ya fue agregado en esta misma factura)
-            if item_id not in [v.get("parent_id") for v in variant_map.values()]:
+        if not is_found:
+            if item_id not in [v.get("parent_id") for v in variant_map.values() if v.get("parent_id")]:
                 new_bc_item = BcItem(
                     ItemID=item_id,
                     DatabaseID=database_id,
@@ -256,17 +253,11 @@ def insert_document_logic(db: Session, data: dict, source_file_id: str, appsheet
                     itDescription=product_desc,
                     CabysID=str(line.get("cabys_candidate") or "")[:20] if line.get("cabys_candidate") else None,
                     itImage=image_path,
-                    itStatus=True,
-                    itCreatedBy="AI_BOT",
-                    Bot=f"Auto-creado por factura {doc_obj.doConsecutive}"
+                    itCreatedBy="AI_BOT"
                 )
                 db.add(new_bc_item)
-                # Actualizamos mapa local
-                parent_map[product_name] = {"parent_id": item_id, "drive_id": image_path} # drive_id temporal
-                variant_map[f"TEMP_{item_id}"] = {"parent_id": item_id, "drive_id": image_path}
+                parent_map[product_name] = {"parent_id": item_id, "drive_id": image_path}
 
-        # 4. Crear la variante (Hijo) - Solo si no existe
-        if not is_found:
             clean_supply_id = str(uuid.uuid4()).replace('-', '')[:8].upper()
             new_bc_item_ln = BcItemLn(
                 ItemLnID=clean_supply_id,
@@ -275,101 +266,101 @@ def insert_document_logic(db: Session, data: dict, source_file_id: str, appsheet
                 lnCode=str(line.get("sku_candidate") or "SIN-CODIGO")[:50],
                 lnTitle=str(line.get("variant_name") or line.get("description") or "Producto Nuevo")[:150],
                 lnSize=str(line.get("size"))[:100] if line.get("size") else None,
-                lnQuantity=qty,
-                lnAvailable=qty,
-                lnStatus=True,
-                lnCreatedBy="AI_BOT",
-                Bot=f"Auto-creado por factura {doc_obj.doConsecutive}"
+                lnQuantity=0, # Initial stock 0 (movements will increase it)
+                lnAvailable=0,
+                lnCreatedBy="AI_BOT"
             )
             db.add(new_bc_item_ln)
-            if line.get("sku_candidate"):
-                sku_map[str(line.get("sku_candidate")).strip().upper()] = clean_supply_id
-            logs.append(f"Línea {line_number}: Producto nuevo {clean_supply_id} creado.")
-            
-        elif is_found:
-            existing_ln = db.query(BcItemLn).filter(
-                BcItemLn.ItemLnID == clean_supply_id,
-                BcItemLn.DatabaseID == database_id
-            ).first()
-            if existing_ln:
-                existing_ln.lnQuantity = (float(existing_ln.lnQuantity) if existing_ln.lnQuantity else 0.0) + qty
-                existing_ln.lnAvailable = (float(existing_ln.lnAvailable) if existing_ln.lnAvailable else 0.0) + qty
-                existing_ln.lnModifiedBy = "AI_BOT"
-                existing_ln.lnModifiedAt = datetime.now()
-            logs.append(f"Línea {line_number}: Stock de {clean_supply_id} actualizado.")
         
         new_ln = FnDocumentLn(
             DocumentLnID=ln_uuid,
-            DocumentID=(doc_obj.DocumentID or "")[:10],
+            DocumentID=doc_obj.DocumentID,
             DatabaseID=database_id,
             dlNumber=line_number,
-            SupplyID=(clean_supply_id or "")[:10],
+            SupplyID=clean_supply_id,
+            CabysID=str(line.get("cabys_candidate") or "")[:50],
             dlDescription=line.get("description"),
             dlQuantity=qty,
             dlUnitPrice=price_unit,
-            dlTotal=total_line,
+            dlSubtotal=subtotal_ln,
+            dlTaxes=tax_ln,
+            dlTotal=total_ln,
             dlObservations=f"Match: {match_type}"
         )
         db.add(new_ln)
-
-        if clean_supply_id and clean_supply_id != "UNKNOWN":
-            
-            mv_id = str(uuid.uuid4()).replace('-', '')[:8].upper()
-            
-            # Truncate values to fit varchar(10) in auxiliary tables. Use 8 for safety.
-            truncated_origin = (doc_obj.doIssuer or "")[:8]
-            truncated_item = (clean_supply_id or "")[:8]
-
-            new_movement = IcMovement(
-                MovementID=mv_id,
-                DatabaseID=database_id,
-                OriginID=truncated_origin,
-                ProjectID=None, 
-                ItemID=truncated_item,
-                DocumentLnID=(line.get("description") or ""), 
-                mvDate=doc_date,
-                mvAction="IN",        
-                mvQuantity=qty,
-                mvStatus="POSTED",
-                mvNotes=f"Auto-generado por Factura {doc_obj.doConsecutive}",
-                mvCreatedby="AI_BOT"
-            )
-            db.add(new_movement)
-            
-            pr_id = str(uuid.uuid4()).replace('-', '')[:8].upper()
-            
-            new_price = IcPrice(
-                PriceID=pr_id,
-                DatabaseID=database_id,
-                ItemID=truncated_item,
-                ProjectID=None, 
-                MovementID=mv_id,         
-                prTitle="Ingreso",
-                prDescription=line.get("description"),
-                prQuantity=qty,
-                prPrice=price_unit,
-                prTotal=total_line,
-                prCreatedby="AI_BOT"
-            )
-            db.add(new_price)
-            
-            logs.append(f"Línea {line_number}: {clean_supply_id} -> Movimiento {mv_id} Creado.")
-        else:
-            logs.append(f"Línea {line_number}: Producto NO identificado. No se generó movimiento.")
-
-        total_doc += total_line
         line_number += 1
 
-    doc_obj.doTotal = total_doc
     db.commit()
     
+    if create_movements:
+        create_inventory_movements_logic(db, doc_obj.DocumentID, database_id)
+        doc_obj.doStatus = "COMPLETED"
+        db.commit()
+
     return {
         "status": "success", 
         "document_id": doc_obj.DocumentID, 
         "logs": logs,
-        "database_id": database_id,
-        "matched_project": matched_project_id
+        "database_id": database_id
     }
+
+def create_inventory_movements_logic(db: Session, document_id: str, database_id: str):
+    """Genera movimientos de inventario basados en las líneas del documento confirmado."""
+    doc = db.query(FnDocument).filter(FnDocument.DocumentID == document_id).first()
+    if not doc:
+        return {"error": "Documento no encontrado"}
+    
+    lines = db.query(FnDocumentLn).filter(FnDocumentLn.DocumentID == document_id).all()
+    created_count = 0
+    
+    for ln in lines:
+        if not ln.SupplyID or ln.SupplyID == "UNKNOWN":
+            continue
+            
+        mv_id = str(uuid.uuid4()).replace('-', '')[:8].upper()
+        
+        new_movement = IcMovement(
+            MovementID=mv_id,
+            DatabaseID=database_id,
+            OriginID=(doc.IssuerID or doc.doIssuer or "")[:10],
+            ItemID=(ln.SupplyID or "")[:10],
+            DocumentLnID=ln.DocumentLnID, 
+            mvDate=doc.doDate or datetime.now(),
+            mvAction="IN",        
+            mvQuantity=ln.dlQuantity,
+            mvStatus="POSTED",
+            mvNotes=f"Auto-generado por Factura {doc.doConsecutive}",
+            mvCreatedby="AI_BOT"
+        )
+        db.add(new_movement)
+        
+        pr_id = str(uuid.uuid4()).replace('-', '')[:8].upper()
+        new_price = IcPrice(
+            PriceID=pr_id,
+            DatabaseID=database_id,
+            ItemID=(ln.SupplyID or "")[:10],
+            MovementID=mv_id,         
+            prTitle="Ingreso",
+            prDescription=(ln.dlDescription or "")[:255],
+            prQuantity=ln.dlQuantity,
+            prPrice=ln.dlUnitPrice,
+            prTax=ln.dlTaxes,
+            prTotal=ln.dlTotal,
+            prCreatedby="AI_BOT"
+        )
+        db.add(new_price)
+        
+        # Update stock in bcItemsLns
+        variant = db.query(BcItemLn).filter(BcItemLn.ItemLnID == ln.SupplyID).first()
+        if variant:
+            variant.lnQuantity = (float(variant.lnQuantity or 0)) + float(ln.dlQuantity)
+            variant.lnAvailable = (float(variant.lnAvailable or 0)) + float(ln.dlQuantity)
+        
+        created_count += 1
+        
+    doc.doStatus = "COMPLETED"
+    db.commit()
+    return {"status": "success", "movements_created": created_count}
 
 def upsert_company_from_invoice_logic(db: Session, data: dict, source_file_id: str, database_id: str = None, target_company_id: str = None, update_if_exists: bool = True):
     """

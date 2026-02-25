@@ -8,7 +8,7 @@ load_dotenv()
 
 _client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 
-_PROMPT = """Extract data from this Costa Rican invoice PDF.
+_PROMPT = """Extract data from this Costa Rican invoice PDF. Be extremely precise with financial totals and taxes.
 
 Column "Código / Cód. CABYS" stacks SKU (e.g. 'GCP') and CABYS ('2413...'). Separate them.
 
@@ -18,6 +18,10 @@ Return JSON:
         "doConsecutive": "string",
         "doDate": "YYYY-MM-DD",
         "doType": "FE or NC",
+        "CurrencyID": "CRC or USD",
+        "SubtotalAmount": 0.0,
+        "TaxAmount": 0.0,
+        "TotalAmount": 0.0,
         "issuer": {
             "cpName": "string or null - Official legal name",
             "cpTitle": "string or null - Commercial name",
@@ -45,8 +49,10 @@ Return JSON:
             "size": "string or null - Size or weight (e.g. '2L', '750 ml')",
             "quantity": 0.0, 
             "unit_price": 0.0,
+            "subtotal_line": 0.0,
             "discount_amount": 0.0,
-            "tax_amount": 0.0
+            "tax_amount": 0.0,
+            "total_line": 0.0
         }
     ]
 }"""

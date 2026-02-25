@@ -20,20 +20,27 @@ app = FastAPI()
 
 _executor = ThreadPoolExecutor(max_workers=4)
 
-class FilePayload(BaseModel):
+class DigitizePayload(BaseModel):
     file_id: str
-    file_name: str = ""
-    doc_id: str = None
     database_id: str
-    company_id: str = None
+
+class ProductUpsertPayload(BaseModel):
+    file_id: str
+    database_id: str
+    extraction_data: dict
+    appsheet_doc_id: str = None
     image_folder_id: str = None
+
+class MovementPayload(BaseModel):
+    document_id: str
+    database_id: str
 
 @app.get("/")
 def read_root():
-    return {"status": "System Online", "version": "3.1.1 (Production Ready)"}
+    return {"status": "System Online", "version": "4.0.0 (Multi-Step Flow)"}
 
 def _check_duplicate(file_id: str, database_id: str):
-    """Verifica duplicados en un hilo separado filtrando por archivo y base de datos."""
+    """Verifica duplicados filtrando por archivo y base de datos."""
     db = SessionLocal()
     try:
         result = db.query(FnDocument).filter(
@@ -44,98 +51,103 @@ def _check_duplicate(file_id: str, database_id: str):
     finally:
         db.close()
 
+@app.post("/webhook/digitize")
+async def digitize_invoice(payload: DigitizePayload):
+    """Paso 1: Solo digitalización vía IA."""
+    file_id = payload.file_id
+    db_id = payload.database_id
+    logger.info(f"Digitalizando archivo: {file_id} (Client: {db_id})")
+
+    loop = asyncio.get_event_loop()
+    content, meta = await loop.run_in_executor(_executor, download_with_validation, file_id)
+    
+    if not content:
+        raise HTTPException(status_code=404, detail="Archivo no accesible en Drive")
+
+    data = extract_invoice_data(content)
+    if not data:
+        raise HTTPException(status_code=422, detail="Fallo extracción IA")
+
+    return {"status": "success", "extraction": data}
+
+@app.post("/webhook/upsert-products")
+async def upsert_products(payload: ProductUpsertPayload, db: Session = Depends(get_db)):
+    """Paso 2: Inserción de productos y documento (Manual o Automático)."""
+    try:
+        img_folder = payload.image_folder_id or os.environ.get("DEFAULT_IMAGE_FOLDER_ID")
+        
+        result = insert_document_logic(
+            db, 
+            payload.extraction_data, 
+            source_file_id=payload.file_id, 
+            appsheet_doc_id=payload.appsheet_doc_id, 
+            database_id=payload.database_id,
+            image_folder_id=img_folder,
+            create_movements=False # Nuevo flag para separar pasos
+        )
+        return {"status": "success", "data": result}
+    except Exception as e:
+        logger.error(f"Error en Upsert: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/webhook/create-movements")
+async def create_movements(payload: MovementPayload, db: Session = Depends(get_db)):
+    """Paso 3: Generación de movimientos de inventario."""
+    try:
+        from logic import create_inventory_movements_logic
+        result = create_inventory_movements_logic(db, payload.document_id, payload.database_id)
+        return {"status": "success", "result": result}
+    except Exception as e:
+        logger.error(f"Error en Movimientos: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+# El endpoint original se mantiene para compatibilidad si es necesario, 
+# pero el flujo recomendado es el de 3 pasos.
 @app.post("/webhook/process-drive-file")
 async def process_drive_file(payload: FilePayload, db: Session = Depends(get_db)):
     file_id = payload.file_id
     db_id = payload.database_id
-    request_start = time.time()
-    logger.info(f"Procesando archivo ID: {file_id} (Client: {db_id})")
+    logger.info(f"Procesando archivo ID: {file_id} (Client: {db_id}) - Legacy Flow")
 
-    t0 = time.time()
     loop = asyncio.get_event_loop()
-    
     dup_future = loop.run_in_executor(_executor, _check_duplicate, file_id, db_id)
     drive_future = loop.run_in_executor(_executor, download_with_validation, file_id)
     
     exists, (content, meta) = await asyncio.gather(dup_future, drive_future)
     
     if exists:
-        return {
-            "status": "skipped", 
-            "reason": "Already processed", 
-            "document_id": exists.DocumentID
-        }
+        return {"status": "skipped", "reason": "Already processed", "document_id": exists.DocumentID}
 
     if not content:
-        raise HTTPException(status_code=404, detail="Archivo no accesible o no existe en Drive")
+        raise HTTPException(status_code=404, detail="Archivo no accesible")
 
-    t_ai = time.time()
     data = extract_invoice_data(content)
-    
     if not data:
         raise HTTPException(status_code=422, detail="Fallo extracción IA")
 
     try:
         img_folder = payload.image_folder_id or os.environ.get("DEFAULT_IMAGE_FOLDER_ID")
-        
-        t_db = time.time()
         result = insert_document_logic(
-            db, 
-            data, 
-            source_file_id=file_id, 
-            appsheet_doc_id=payload.doc_id, 
-            database_id=payload.database_id,
-            image_folder_id=img_folder
+            db, data, source_file_id=file_id, appsheet_doc_id=payload.doc_id, 
+            database_id=payload.database_id, image_folder_id=img_folder, create_movements=True
         )
-        
-        total_time = time.time() - request_start
-        logger.info(f"Procesado exitoso: {file_id} en {total_time:.2f}s")
-        
-        result["processing_time_seconds"] = round(total_time, 2)
         return {"status": "success", "data": result}
     except Exception as e:
-        logger.error(f"Error DB: {e}")
+        logger.error(f"Error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/webhook/extract-company")
 async def extract_company(payload: FilePayload, db: Session = Depends(get_db)):
+    # ... (Misma lógica de antes)
     file_id = payload.file_id
-    request_start = time.time()
-    logger.info(f"Extrayendo empresa para archivo: {file_id}")
-
-    t0 = time.time()
     loop = asyncio.get_event_loop()
-    
-    drive_future = loop.run_in_executor(_executor, download_with_validation, file_id)
-    content, meta = await drive_future
-    
-    if not content:
-        raise HTTPException(status_code=404, detail="Archivo no accesible o no existe en Drive")
-
+    content, meta = await loop.run_in_executor(_executor, download_with_validation, file_id)
+    if not content: raise HTTPException(status_code=404)
     data = extract_company_data(content)
-    
-    if not data:
-        raise HTTPException(status_code=422, detail="Fallo extracción IA para empresa")
-
-    try:
-        result = upsert_company_from_invoice_logic(
-            db, 
-            data, 
-            source_file_id=file_id, 
-            database_id=payload.database_id,
-            target_company_id=payload.company_id
-        )
-        
-        total_time = time.time() - request_start
-        logger.info(f"Extracción empresa exitosa: {file_id} en {total_time:.2f}s")
-        
-        result["processing_time_seconds"] = round(total_time, 2)
-        return {"status": "success", "data": result}
-    except Exception as e:
-        logger.error(f"Error DB: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+    if not data: raise HTTPException(status_code=422)
+    result = upsert_company_from_invoice_logic(db, data, file_id, payload.database_id, payload.company_id)
+    return {"status": "success", "data": result}
 
 if __name__ == "__main__":
     import uvicorn
-    port = int(os.environ.get("PORT", 10000))
-    uvicorn.run("main:app", host="0.0.0.0", port=port, reload=True)
+    uvicorn.run("main:app", host="0.0.0.0", port=int(os.environ.get("PORT", 10000)), reload=True)
