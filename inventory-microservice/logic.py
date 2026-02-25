@@ -10,31 +10,37 @@ import threading
 
 logger = logging.getLogger(__name__)
 
-def fetch_and_upload_image_task(query: str, filename: str, folder_id: str):
+def fetch_and_upload_image_task(query: str, filename: str, folder_id: str, item_id: str = None):
     """Tarea en background para descargar y subir a Drive sin bloquear el request"""
     try:
-        print(f"\n[BACKGROUND_TASK] Iniciando para: {query}")
-        logger.info(f"Hilo Background: Buscando imagen para [{query}]...")
-        img_bytes, img_type, img_ext = search_product_image(query)
+        logger.info(f"Hilo Background: Iniciando búsqueda para [{query}] (Item: {item_id})...")
+        img_bytes, img_type, _ = search_product_image(query)
         
         if img_bytes:
-            print(f"[BACKGROUND_TASK] Imagen obtenida ({len(img_bytes)} bytes). Subiendo a Drive...")
-            # Subimos manteniendo el nombre 'filename' impuesto por la DB
-            uploaded_url = upload_image_to_drive(img_bytes, filename, img_type, folder_id)
-            if uploaded_url:
-                print(f"[BACKGROUND_TASK] ¡EXITO! Imagen subida: {uploaded_url}")
-                logger.info(f"Hilo Background: OK. Imagen guardada como {filename} en Drive.")
+            drive_file_id = upload_image_to_drive(img_bytes, filename, img_type, folder_id)
+            
+            if drive_file_id:
+                if item_id:
+                    from database import SessionLocal
+                    db = SessionLocal()
+                    try:
+                        item = db.query(BcItem).filter(BcItem.ItemID == item_id).first()
+                        if item:
+                            if not item.DriveID or item.itImage == filename:
+                                item.DriveID = drive_file_id
+                                item.itImage = filename
+                                db.commit()
+                                logger.info(f"DB Actualizada: Item {item_id} -> DriveID {drive_file_id}")
+                    except Exception as de:
+                        logger.error(f"Error al actualizar DB en background: {de}")
+                    finally:
+                        db.close()
             else:
-                print(f"[BACKGROUND_TASK] ERROR: La subida a Drive falló.")
-                logger.error(f"Hilo Background: Falló la subida a Drive para {filename}")
+                logger.error(f"La subida a Drive falló para el item {item_id}")
         else:
-            print(f"[BACKGROUND_TASK] ADVERTENCIA: No se encontró imagen para '{query}'.")
-            logger.warning(f"Hilo Background: No se encontró imagen para {query}")
+            logger.warning(f"No se encontró imagen para '{query}'")
     except Exception as e:
-        print(f"[BACKGROUND_TASK] CRASH CRITICO: {e}")
-        import traceback
-        traceback.print_exc()
-        logger.error(f"Error en Hilo Background Imagen: {e}")
+        logger.error(f"Error crítico en hilo de imagen: {e}")
 
 def _load_product_catalog(db: Session, database_id: str):
     """Carga el catálogo de productos por DatabaseID.
@@ -43,7 +49,7 @@ def _load_product_catalog(db: Session, database_id: str):
     para obtener lnCode (SKU) y nombres.
     Retorna ItemLnID (variante) para diferenciar presentaciones en inventario.
     """
-    all_items = db.query(BcItemLn.ItemLnID, BcItemLn.lnCode, BcItemLn.lnTitle, BcItem.itTitle, BcItem.ItemID)\
+    all_items = db.query(BcItemLn.ItemLnID, BcItemLn.lnCode, BcItemLn.lnTitle, BcItem.itTitle, BcItem.ItemID, BcItem.DriveID)\
                   .join(BcItem, BcItemLn.ItemID == BcItem.ItemID)\
                   .filter(BcItemLn.DatabaseID == database_id)\
                   .filter(BcItemLn.isDeleted.isnot(True))\
@@ -51,10 +57,16 @@ def _load_product_catalog(db: Session, database_id: str):
     
     sku_map = {}
     choices_map = {}
-    parent_map = {} # Mapeo de itTitle -> ItemID para productos maestros
+    parent_map = {}   # itTitle -> {"parent_id": ItemID, "drive_id": DriveID}
+    variant_map = {}  # ItemLnID -> {"parent_id": ItemID, "drive_id": DriveID}
+    
     for item in all_items:
         if item.lnCode:
             sku_map[item.lnCode.strip().upper()] = item.ItemLnID
+            
+        # Almacenar metadatos del variante/hijo
+        variant_map[item.ItemLnID] = {"parent_id": item.ItemID, "drive_id": item.DriveID}
+            
         # Se prioriza el nombre del producto padre, pero se puede usar el de la variante
         title = item.itTitle or item.lnTitle
         if title and title not in choices_map:
@@ -62,8 +74,9 @@ def _load_product_catalog(db: Session, database_id: str):
             
         # Mapear el producto padre para reuso de jerarquía
         if item.itTitle and item.itTitle not in parent_map:
-            parent_map[item.itTitle] = item.ItemID
-    return sku_map, choices_map, parent_map
+            parent_map[item.itTitle] = {"parent_id": item.ItemID, "drive_id": item.DriveID}
+            
+    return sku_map, choices_map, parent_map, variant_map
 
 def find_product_id(sku: str, description: str, sku_map: dict, choices_map: dict):
     """Busca el ItemLnID priorizando Fuzzy Match por descripción sobre SKU."""
@@ -104,10 +117,13 @@ def find_project_id(address_text: str, project_choices: dict):
     return None
 
 def insert_document_logic(db: Session, data: dict, source_file_id: str, appsheet_doc_id: str = None, database_id: str = "BBJ", image_folder_id: str = None):
+    # Truncate database_id to fit varchar(10)
+    database_id = (database_id or "")[:10]
+    
     header = data.get("header", {})
     lines = data.get("lines", [])
     
-    sku_map, choices_map, parent_map = _load_product_catalog(db, database_id)
+    sku_map, choices_map, parent_map, variant_map = _load_product_catalog(db, database_id)
     project_choices = _load_project_catalog(db, database_id)
     
     issuer_data = header.get("issuer", {})
@@ -137,7 +153,7 @@ def insert_document_logic(db: Session, data: dict, source_file_id: str, appsheet
         doc_obj = db.query(FnDocument).filter(FnDocument.DocumentID == appsheet_doc_id).first()
     
     if not doc_obj:
-        doc_id = appsheet_doc_id if appsheet_doc_id else str(uuid.uuid4())[:8].upper()
+        doc_id = (str(appsheet_doc_id)[:10]) if appsheet_doc_id else str(uuid.uuid4())[:8].upper()
         doc_obj = FnDocument(DocumentID=doc_id)
         db.add(doc_obj)
     
@@ -176,49 +192,63 @@ def insert_document_logic(db: Session, data: dict, source_file_id: str, appsheet
         qty = float(line.get("quantity", 0))
         price_unit = float(line.get("unit_price", 0))
         total_line = float(line.get("total", (qty * price_unit))) 
+        ln_uuid = str(uuid.uuid4()).replace('-', '')[:8].upper()
 
-        ln_uuid = str(uuid.uuid4()).replace('-', '')[:10].upper()
-        
-        if not is_found and clean_supply_id != "UNKNOWN":
-            # 1. Intentar buscar un producto PADRE existente antes de crear uno nuevo
-            product_name = str(line.get("product_name") or line.get("description") or "Producto Nuevo").strip()
-            item_id = None
-            
+        # 1. Determinamos el MASTER PRODUCT (parent) y si ya tiene imagen
+        product_name = str(line.get("product_name") or line.get("description") or "Producto").strip()
+        product_desc = str(line.get("description") or "")
+        item_id = None
+        existing_drive_id = None
+
+        if is_found:
+            meta = variant_map.get(clean_supply_id)
+            if meta:
+                item_id = meta.get("parent_id")
+                existing_drive_id = meta.get("drive_id")
+        else:
             if parent_map:
                 p_keys = list(parent_map.keys())
                 p_matches = difflib.get_close_matches(product_name, p_keys, n=1, cutoff=0.85)
                 if p_matches:
-                    item_id = parent_map[p_matches[0]]
-                    logger.info(f"Línea {line_number}: Asociando a producto maestro existente: {p_matches[0]} ({item_id})")
+                    meta = parent_map[p_matches[0]]
+                    item_id = meta["parent_id"]
+                    existing_drive_id = meta["drive_id"]
+                    logger.info(f"Línea {line_number}: Asociando a producto maestro existente por nombre: {p_matches[0]} ({item_id})")
 
-            # 2. Si no hay padre, crearlo
-            if not item_id:
-                item_id = str(uuid.uuid4()).replace('-', '')[:10].upper()
-                
-                image_path = None
-                product_desc = str(line.get("description") or "")
-                if image_folder_id and product_desc:
-                    # AppSheet Format: "Kaizen/A14-Bodegas Benjamin/Items/0895E257F3.itImage.163806.png"
-                    time_code = datetime.now().strftime("%H%M%S")
-                    filename = f"{item_id}.itImage.{time_code}.png"
-                    
-                    # 3. Guardamos la ruta completa para AppSheet
-                    # El usuario indicó que debe empezar desde la raíz: "03-Aplicaciones/..."
-                    resolved_folder_path = get_folder_path_from_drive(image_folder_id)
-                    
-                    # Si el Service Account no ve la raíz del Shared Drive, la forzamos
-                    if resolved_folder_path and not resolved_folder_path.startswith("03-Aplicaciones"):
-                        resolved_folder_path = f"03-Aplicaciones/{resolved_folder_path}"
-                    
-                    image_path = f"{resolved_folder_path}{filename}"
-                    
-                    # Lanzar el hilo en background para descargar y subir a Drive
-                    threading.Thread(
-                        target=fetch_and_upload_image_task, 
-                        args=(product_desc, filename, image_folder_id),
-                        daemon=True
-                    ).start()
+        # 2. Lógica de IMAGEN (Infalible y Optimizada)
+        search_query = f"{product_name} {product_desc}".strip()
+        # Filtro de términos genéricos para evitar imágenes erróneas
+        blacklist = ["GENERAL", "MISC", "PRODUCTO", "SERVICIO", "VARIOS", "LINEA", "ARTICULO", "SIN NOMBRE"]
+        is_generic = any(term in search_query.upper() for term in blacklist) or len(search_query) < 3
+        
+        # SIEMPRE asegurar que tenemos item_id si es producto nuevo
+        if not item_id:
+            item_id = str(uuid.uuid4()).replace('-', '')[:8].upper()
 
+        image_path = None
+        # Solo disparamos búsqueda si no existe imagen Y no es genérico
+        if not existing_drive_id and image_folder_id and not is_generic:
+            time_code = datetime.now().strftime("%H%M%S")
+            filename = f"{item_id}.itImage.{time_code}.png"
+            
+            # Guardamos ruta teórica para AppSheet
+            resolved_folder_path = get_folder_path_from_drive(image_folder_id)
+            if resolved_folder_path and not resolved_folder_path.startswith("03-Aplicaciones"):
+                resolved_folder_path = f"03-Aplicaciones/{resolved_folder_path}"
+            image_path = f"{resolved_folder_path}{filename}"
+
+            # Disparar búsqueda real en background
+            threading.Thread(
+                target=fetch_and_upload_image_task, 
+                args=(search_query, filename, image_folder_id, item_id),
+                daemon=True
+            ).start()
+
+        # 3. CREACIÓN o ACTUALIZACIÓN del Producto Maestro
+        if not is_found and not any(meta.get("parent_id") == item_id for meta in variant_map.values() if item_id):
+            # Solo creamos el maestro si no existe en el catálogo cargado
+            # (Verificamos si ya fue agregado en esta misma factura)
+            if item_id not in [v.get("parent_id") for v in variant_map.values()]:
                 new_bc_item = BcItem(
                     ItemID=item_id,
                     DatabaseID=database_id,
@@ -231,12 +261,13 @@ def insert_document_logic(db: Session, data: dict, source_file_id: str, appsheet
                     Bot=f"Auto-creado por factura {doc_obj.doConsecutive}"
                 )
                 db.add(new_bc_item)
-                # Agregamos al mapa local para evitar duplicados en la misma factura si vienen varias líneas del mismo padre
-                parent_map[product_name] = item_id
-            
-            # 3. Crear la variante (Hijo)
-            clean_supply_id = str(uuid.uuid4()).replace('-', '')[:10].upper()
-            
+                # Actualizamos mapa local
+                parent_map[product_name] = {"parent_id": item_id, "drive_id": image_path} # drive_id temporal
+                variant_map[f"TEMP_{item_id}"] = {"parent_id": item_id, "drive_id": image_path}
+
+        # 4. Crear la variante (Hijo) - Solo si no existe
+        if not is_found:
+            clean_supply_id = str(uuid.uuid4()).replace('-', '')[:8].upper()
             new_bc_item_ln = BcItemLn(
                 ItemLnID=clean_supply_id,
                 ItemID=item_id,
@@ -251,10 +282,8 @@ def insert_document_logic(db: Session, data: dict, source_file_id: str, appsheet
                 Bot=f"Auto-creado por factura {doc_obj.doConsecutive}"
             )
             db.add(new_bc_item_ln)
-            
             if line.get("sku_candidate"):
                 sku_map[str(line.get("sku_candidate")).strip().upper()] = clean_supply_id
-                
             logs.append(f"Línea {line_number}: Producto nuevo {clean_supply_id} creado.")
             
         elif is_found:
@@ -271,10 +300,10 @@ def insert_document_logic(db: Session, data: dict, source_file_id: str, appsheet
         
         new_ln = FnDocumentLn(
             DocumentLnID=ln_uuid,
-            DocumentID=doc_obj.DocumentID,
+            DocumentID=(doc_obj.DocumentID or "")[:10],
             DatabaseID=database_id,
             dlNumber=line_number,
-            SupplyID=clean_supply_id,
+            SupplyID=(clean_supply_id or "")[:10],
             dlDescription=line.get("description"),
             dlQuantity=qty,
             dlUnitPrice=price_unit,
@@ -285,11 +314,11 @@ def insert_document_logic(db: Session, data: dict, source_file_id: str, appsheet
 
         if clean_supply_id and clean_supply_id != "UNKNOWN":
             
-            mv_id = str(uuid.uuid4()).replace('-', '')[:10].upper()
+            mv_id = str(uuid.uuid4()).replace('-', '')[:8].upper()
             
-            # Truncate values to fit varchar(10) in auxiliary tables
-            truncated_origin = (doc_obj.doIssuer or "")[:10]
-            truncated_item = (clean_supply_id or "")[:10]
+            # Truncate values to fit varchar(10) in auxiliary tables. Use 8 for safety.
+            truncated_origin = (doc_obj.doIssuer or "")[:8]
+            truncated_item = (clean_supply_id or "")[:8]
 
             new_movement = IcMovement(
                 MovementID=mv_id,
@@ -307,7 +336,7 @@ def insert_document_logic(db: Session, data: dict, source_file_id: str, appsheet
             )
             db.add(new_movement)
             
-            pr_id = str(uuid.uuid4()).replace('-', '')[:10].upper()
+            pr_id = str(uuid.uuid4()).replace('-', '')[:8].upper()
             
             new_price = IcPrice(
                 PriceID=pr_id,

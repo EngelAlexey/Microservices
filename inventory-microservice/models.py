@@ -21,6 +21,7 @@ class BcItem(Base):
     itModifiedBy = Column(String(20))
     itModifiedAt = Column(DateTime, default=datetime.datetime.now)
     itEnabled = Column(Text)
+    DriveID = Column(String(100), nullable=True)
     Bot = Column(String(100))
 
 class BcItemLn(Base):

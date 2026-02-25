@@ -1,15 +1,17 @@
+import logging
+import time
+import asyncio
+import os
+from concurrent.futures import ThreadPoolExecutor
 from fastapi import FastAPI, HTTPException, Depends
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
+
 from database import get_db, engine, Base, SessionLocal
 from models import FnDocument 
 from ai_services import extract_invoice_data, extract_company_data
 from logic import insert_document_logic, upsert_company_from_invoice_logic
 from drive_services import download_with_validation
-import logging
-import time
-import asyncio
-from concurrent.futures import ThreadPoolExecutor
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -28,7 +30,7 @@ class FilePayload(BaseModel):
 
 @app.get("/")
 def read_root():
-    return {"status": "System Online", "version": "3.1.0 (Performance Optimized v2)"}
+    return {"status": "System Online", "version": "3.1.1 (Production Ready)"}
 
 def _check_duplicate(file_id: str):
     """Verifica duplicados en un hilo separado con su propia sesión DB."""
@@ -43,7 +45,7 @@ def _check_duplicate(file_id: str):
 async def process_drive_file(payload: FilePayload, db: Session = Depends(get_db)):
     file_id = payload.file_id
     request_start = time.time()
-    logger.info(f"⏱️ Procesando archivo ID: {file_id}")
+    logger.info(f"Procesando archivo ID: {file_id}")
 
     t0 = time.time()
     loop = asyncio.get_event_loop()
@@ -52,7 +54,6 @@ async def process_drive_file(payload: FilePayload, db: Session = Depends(get_db)
     drive_future = loop.run_in_executor(_executor, download_with_validation, file_id)
     
     exists, (content, meta) = await asyncio.gather(dup_future, drive_future)
-    logger.info(f"⏱️ Paso 1+2 - Duplicados + Drive (paralelo): {time.time() - t0:.2f}s")
     
     if exists:
         return {
@@ -64,27 +65,27 @@ async def process_drive_file(payload: FilePayload, db: Session = Depends(get_db)
     if not content:
         raise HTTPException(status_code=404, detail="Archivo no accesible o no existe en Drive")
 
-    t2 = time.time()
+    t_ai = time.time()
     data = extract_invoice_data(content)
-    logger.info(f"⏱️ Paso 3 - Gemini AI: {time.time() - t2:.2f}s")
     
     if not data:
         raise HTTPException(status_code=422, detail="Fallo extracción IA")
 
-    t3 = time.time()
     try:
+        img_folder = payload.image_folder_id or os.environ.get("DEFAULT_IMAGE_FOLDER_ID")
+        
+        t_db = time.time()
         result = insert_document_logic(
             db, 
             data, 
             source_file_id=file_id, 
             appsheet_doc_id=payload.doc_id, 
             database_id=payload.database_id,
-            image_folder_id=payload.image_folder_id
+            image_folder_id=img_folder
         )
-        logger.info(f"⏱️ Paso 4 - DB Insert: {time.time() - t3:.2f}s")
         
         total_time = time.time() - request_start
-        logger.info(f"TOTAL: {total_time:.2f}s para archivo {file_id}")
+        logger.info(f"Procesado exitoso: {file_id} en {total_time:.2f}s")
         
         result["processing_time_seconds"] = round(total_time, 2)
         return {"status": "success", "data": result}
@@ -96,26 +97,22 @@ async def process_drive_file(payload: FilePayload, db: Session = Depends(get_db)
 async def extract_company(payload: FilePayload, db: Session = Depends(get_db)):
     file_id = payload.file_id
     request_start = time.time()
-    logger.info(f"⏱️ Procesando archivo ID (Company Extra): {file_id}")
+    logger.info(f"Extrayendo empresa para archivo: {file_id}")
 
     t0 = time.time()
     loop = asyncio.get_event_loop()
     
     drive_future = loop.run_in_executor(_executor, download_with_validation, file_id)
     content, meta = await drive_future
-    logger.info(f"⏱️ Paso 1 - Drive: {time.time() - t0:.2f}s")
     
     if not content:
         raise HTTPException(status_code=404, detail="Archivo no accesible o no existe en Drive")
 
-    t2 = time.time()
     data = extract_company_data(content)
-    logger.info(f"⏱️ Paso 2 - Gemini AI Company Extra: {time.time() - t2:.2f}s")
     
     if not data:
         raise HTTPException(status_code=422, detail="Fallo extracción IA para empresa")
 
-    t3 = time.time()
     try:
         result = upsert_company_from_invoice_logic(
             db, 
@@ -124,10 +121,9 @@ async def extract_company(payload: FilePayload, db: Session = Depends(get_db)):
             database_id=payload.database_id,
             target_company_id=payload.company_id
         )
-        logger.info(f"⏱️ Paso 3 - DB Upsert: {time.time() - t3:.2f}s")
         
         total_time = time.time() - request_start
-        logger.info(f"TOTAL: {total_time:.2f}s para archivo {file_id}")
+        logger.info(f"Extracción empresa exitosa: {file_id} en {total_time:.2f}s")
         
         result["processing_time_seconds"] = round(total_time, 2)
         return {"status": "success", "data": result}
@@ -137,6 +133,5 @@ async def extract_company(payload: FilePayload, db: Session = Depends(get_db)):
 
 if __name__ == "__main__":
     import uvicorn
-    import os
     port = int(os.environ.get("PORT", 10000))
     uvicorn.run("main:app", host="0.0.0.0", port=port, reload=True)
