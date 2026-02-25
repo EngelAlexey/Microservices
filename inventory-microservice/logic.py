@@ -131,11 +131,15 @@ def insert_document_logic(db: Session, data: dict, source_file_id: str, appsheet
     receptor_id = header.get("doReceptorID")
     
     if issuer_data and any(issuer_data.values()):
+        # Issuer is usually Supplier/Partner
+        issuer_data["cpCategory"] = "Supplier" 
         issuer_res = upsert_company_from_invoice_logic(db, issuer_data, source_file_id, database_id, update_if_exists=False)
         if issuer_res.get("status") == "success":
             issuer_id = issuer_res.get("company_id")
             
     if receptor_data and any(receptor_data.values()):
+        # Receptor is usually Client/Company
+        receptor_data["cpCategory"] = "Client"
         receptor_res = upsert_company_from_invoice_logic(db, receptor_data, source_file_id, database_id, update_if_exists=False)
         if receptor_res.get("status") == "success":
             receptor_id = receptor_res.get("company_id")
@@ -397,13 +401,15 @@ def upsert_company_from_invoice_logic(db: Session, data: dict, source_file_id: s
     company_obj.cpFile = source_file_id
     
     if data.get("cpName"):
-        company_obj.cpName = str(data.get("cpName"))[:200]
+        company_obj.cpName = str(data.get("cpName"))[:300]
     if data.get("cpTitle"):
-        company_obj.cpTitle = str(data.get("cpTitle"))[:150]
+        company_obj.cpTitle = str(data.get("cpTitle"))[:300]
+    if data.get("cpCategory"):
+        company_obj.cpCategory = str(data.get("cpCategory"))[:150]
     if data.get("cpIdentification"):
-        company_obj.cpIdentification = str(data.get("cpIdentification"))[:100]
+        company_obj.cpIdentification = str(data.get("cpIdentification"))[:300]
     if data.get("cpAddress"):
-        company_obj.cpAddress = str(data.get("cpAddress"))[:500]
+        company_obj.cpAddress = str(data.get("cpAddress"))[:150]
     if data.get("cpEmail"):
         company_obj.cpEmail = str(data.get("cpEmail"))[:150]
     if data.get("cpPhone"):

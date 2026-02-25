@@ -34,16 +34,16 @@ Return JSON:
         "TaxAmount": 0.0,
         "TotalAmount": 0.0,
         "issuer": {
-            "cpName": "string or null",
-            "cpTitle": "string or null",
+            "cpName": "string or null - Official Legal Name (Razón Social)",
+            "cpTitle": "string or null - Trade / Fantasy Name (Nombre Comercial/Fantasía)",
             "cpIdentification": "string or null",
             "cpAddress": "string or null",
             "cpPhone": "string or null",
             "cpEmail": "string or null"
         },
         "receptor": {
-            "cpName": "string or null",
-            "cpTitle": "string or null",
+            "cpName": "string or null - Official Legal Name (Razón Social)",
+            "cpTitle": "string or null - Trade / Fantasy Name (Nombre Comercial/Fantasía)",
             "cpIdentification": "string or null",
             "cpAddress": "string or null",
             "cpPhone": "string or null",
