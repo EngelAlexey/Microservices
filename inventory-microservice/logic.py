@@ -78,22 +78,19 @@ def _load_product_catalog(db: Session, database_id: str):
             
     return sku_map, choices_map, parent_map, variant_map
 
-def find_product_id(sku: str, description: str, sku_map: dict, choices_map: dict):
-    """Busca el ItemLnID priorizando Fuzzy Match por descripción sobre SKU."""
-    # 1. Intentar por descripción (Fuzzy Match) - Prioridad Alta
-    if choices_map and description:
-        keys = list(choices_map.keys())
-        matches = difflib.get_close_matches(str(description).strip(), keys, n=1, cutoff=0.8)
-        if matches:
-            return choices_map[matches[0]], f"Fuzzy Name ({matches[0][:20]})"
-            
-    # 2. Intentar buscar por SKU si la descripción no dió un match seguro:
-    if sku:
-        clean_sku = sku.strip().upper()
-        if clean_sku in sku_map:
-            return sku_map[clean_sku], "Exact SKU"
+def find_product_id(description: str, choices_map: dict):
+    """Busca el ItemLnID usando match EXACTO de nombre para evitar falsos positivos."""
+    if not description or not choices_map:
+        return "UNKNOWN", "Raw Name"
     
-    return sku or "UNKNOWN", "Raw SKU"
+    clean_desc = str(description).strip().lower()
+    
+    # 1. Búsqueda por match exacto (case-insensitive)
+    for title, ln_id in choices_map.items():
+        if str(title).strip().lower() == clean_desc:
+            return ln_id, f"Exact Name ({title[:20]})"
+    
+    return "UNKNOWN", "Raw Name"
 
 def _load_project_catalog(db: Session, database_id: str):
     projects = db.query(DrProject.ProjectID, DrProject.pjTitle, DrProject.pjAddress)\
@@ -116,13 +113,15 @@ def find_project_id(address_text: str, project_choices: dict):
         return project_choices[matches[0]]
     return None
 
-def insert_document_logic(db: Session, data: dict, source_file_id: str, appsheet_doc_id: str = None, database_id: str = None, image_folder_id: str = None, create_movements: bool = True):
-    # Truncate database_id to fit varchar(10)
+def insert_document_logic(db: Session, data: dict, source_file_id: str, appsheet_doc_id: str = None, database_id: str = None):
+    """PASO 1: Digitalización y Creación de Borrador (DRAFT).
+    No crea ítems maestros ni movimientos. Solo las filas de la factura.
+    """
     database_id = (database_id or "")[:10]
-    
     header = data.get("header", {})
     lines = data.get("lines", [])
     
+    # Solo cargamos catálogo para intentar pre-asignar SupplyID si hay match EXACTO
     sku_map, choices_map, parent_map, variant_map = _load_product_catalog(db, database_id)
     project_choices = _load_project_catalog(db, database_id)
     
@@ -132,19 +131,17 @@ def insert_document_logic(db: Session, data: dict, source_file_id: str, appsheet
     issuer_id = header.get("doIssuerID")
     receptor_id = header.get("doReceptorID")
     
-    # Upsert Issuer
+    # Upsert Issuer/Receptor (No afecta inventario)
     if issuer_data and any(issuer_data.values()):
         issuer_res = upsert_company_from_invoice_logic(db, issuer_data, source_file_id, database_id, update_if_exists=False)
         if issuer_res.get("status") == "success":
             issuer_id = issuer_res.get("company_id")
             
-    # Upsert Receptor
     if receptor_data and any(receptor_data.values()):
         receptor_res = upsert_company_from_invoice_logic(db, receptor_data, source_file_id, database_id, update_if_exists=False)
         if receptor_res.get("status") == "success":
             receptor_id = receptor_res.get("company_id")
             
-    # Matching de proyecto basado en las direcciones extraídas
     address_to_match = f"{issuer_data.get('cpAddress', '')} {receptor_data.get('cpAddress', '')}"
     matched_project_id = find_project_id(address_to_match, project_choices)
     
@@ -159,10 +156,7 @@ def insert_document_logic(db: Session, data: dict, source_file_id: str, appsheet
     
     try:
         doc_date_str = header.get("doDate")
-        if doc_date_str:
-            doc_date = datetime.strptime(doc_date_str, "%Y-%m-%d").date()
-        else:
-            doc_date = datetime.now().date()
+        doc_date = datetime.strptime(doc_date_str, "%Y-%m-%d").date() if doc_date_str else datetime.now().date()
     except:
         doc_date = datetime.now().date()
 
@@ -181,25 +175,18 @@ def insert_document_logic(db: Session, data: dict, source_file_id: str, appsheet
     doc_obj.doTotal = header.get("TotalAmount", 0.0)
     doc_obj.doFile = source_file_id
     doc_obj.DriveID = source_file_id
-    doc_obj.doStatus = "PROCESSED_BY_AI"
-    doc_obj.Bot = f"Step: Digitized. Project: {matched_project_id or 'N/A'}. IA: {data.get('usage', 'N/A')}"
+    doc_obj.doStatus = "DRAFT"
+    doc_obj.Bot = f"Digitalizado. Proyecto: {matched_project_id or 'N/A'}. IA: {data.get('usage', 'N/A')}"
 
-    logs = []
+    # Limpiar líneas previas si se está re-procesando
+    db.query(FnDocumentLn).filter(FnDocumentLn.DocumentID == doc_obj.DocumentID).delete()
+
     line_number = 1
-    
-    # Clean previous lines if re-processing
-    if appsheet_doc_id:
-        db.query(FnDocumentLn).filter(FnDocumentLn.DocumentID == appsheet_doc_id).delete()
-
     for line in lines:
-        clean_supply_id, match_type = find_product_id(
-            sku=line.get("sku_candidate"), 
-            description=line.get("description"),
-            sku_map=sku_map,
-            choices_map=choices_map
-        )
+        manual_desc = str(line.get("description") or "Sin descripción").strip()
+        # Intentamos match EXACTO para pre-completar SupplyID
+        supply_id, match_type = find_product_id(manual_desc, choices_map)
         
-        is_found = match_type != "Raw SKU"
         qty = float(line.get("quantity", 0))
         price_unit = float(line.get("unit_price", 0))
         subtotal_ln = float(line.get("subtotal_line", 0) or (qty * price_unit))
@@ -207,138 +194,110 @@ def insert_document_logic(db: Session, data: dict, source_file_id: str, appsheet
         total_ln = float(line.get("total_line", 0) or (subtotal_ln + tax_ln))
         
         ln_uuid = str(uuid.uuid4()).replace('-', '')[:8].upper()
-
-        product_name = str(line.get("product_name") or line.get("description") or "Producto").strip()
-        product_desc = str(line.get("description") or "")
-        item_id = None
-        existing_drive_id = None
-
-        if is_found:
-            meta = variant_map.get(clean_supply_id)
-            if meta:
-                item_id = meta.get("parent_id")
-                existing_drive_id = meta.get("drive_id")
-        else:
-            if parent_map:
-                p_keys = list(parent_map.keys())
-                p_matches = difflib.get_close_matches(product_name, p_keys, n=1, cutoff=0.85)
-                if p_matches:
-                    meta = parent_map[p_matches[0]]
-                    item_id = meta["parent_id"]
-                    existing_drive_id = meta["drive_id"]
-
-        if not item_id:
-            item_id = str(uuid.uuid4()).replace('-', '')[:8].upper()
-
-        image_path = None
-        if not existing_drive_id and image_folder_id:
-            time_code = datetime.now().strftime("%H%M%S")
-            filename = f"{item_id}.itImage.{time_code}.png"
-            resolved_folder_path = get_folder_path_from_drive(image_folder_id)
-            if resolved_folder_path and not resolved_folder_path.startswith("03-Aplicaciones"):
-                resolved_folder_path = f"03-Aplicaciones/{resolved_folder_path}"
-            image_path = f"{resolved_folder_path}{filename}"
-            threading.Thread(
-                target=fetch_and_upload_image_task, 
-                args=(f"{product_name} {product_desc}", filename, image_folder_id, item_id),
-                daemon=True
-            ).start()
-
-        if not is_found:
-            if item_id not in [v.get("parent_id") for v in variant_map.values() if v.get("parent_id")]:
-                new_bc_item = BcItem(
-                    ItemID=item_id,
-                    DatabaseID=database_id,
-                    itTitle=product_name[:300],
-                    itDescription=product_desc,
-                    CabysID=str(line.get("cabys_candidate") or "")[:20] if line.get("cabys_candidate") else None,
-                    itImage=image_path,
-                    itCreatedBy="AI_BOT"
-                )
-                db.add(new_bc_item)
-                parent_map[product_name] = {"parent_id": item_id, "drive_id": image_path}
-
-            clean_supply_id = str(uuid.uuid4()).replace('-', '')[:8].upper()
-            new_bc_item_ln = BcItemLn(
-                ItemLnID=clean_supply_id,
-                ItemID=item_id,
-                DatabaseID=database_id,
-                lnCode=str(line.get("sku_candidate") or "SIN-CODIGO")[:50],
-                lnTitle=str(line.get("variant_name") or line.get("description") or "Producto Nuevo")[:150],
-                lnSize=str(line.get("size"))[:100] if line.get("size") else None,
-                lnQuantity=0, # Initial stock 0 (movements will increase it)
-                lnAvailable=0,
-                lnCreatedBy="AI_BOT"
-            )
-            db.add(new_bc_item_ln)
         
         new_ln = FnDocumentLn(
             DocumentLnID=ln_uuid,
             DocumentID=doc_obj.DocumentID,
             DatabaseID=database_id,
             dlNumber=line_number,
-            SupplyID=clean_supply_id,
+            SupplyID=supply_id if supply_id != "UNKNOWN" else None, # Se mantiene vacío si no hay match exacto
             CabysID=str(line.get("cabys_candidate") or "")[:50],
-            dlDescription=line.get("description"),
+            dlDescription=manual_desc,
             dlQuantity=qty,
             dlUnitPrice=price_unit,
             dlSubtotal=subtotal_ln,
             dlTaxes=tax_ln,
             dlTotal=total_ln,
-            dlObservations=f"Match: {match_type}"
+            dlObservations=f"AI Extraction Match: {match_type}"
         )
         db.add(new_ln)
         line_number += 1
 
     db.commit()
-    
-    if create_movements:
-        create_inventory_movements_logic(db, doc_obj.DocumentID, database_id)
-        doc_obj.doStatus = "COMPLETED"
-        db.commit()
+    return {"status": "success", "document_id": doc_obj.DocumentID, "database_id": database_id}
 
-    return {
-        "status": "success", 
-        "document_id": doc_obj.DocumentID, 
-        "logs": logs,
-        "database_id": database_id
-    }
-
-def create_inventory_movements_logic(db: Session, document_id: str, database_id: str):
-    """Genera movimientos de inventario basados en las líneas del documento confirmado."""
+def create_inventory_movements_logic(db: Session, document_id: str, database_id: str, image_folder_id: str = None):
+    """PASO 2: Confirmación y Fulfillment.
+    Valida ítems, los crea si no existen (match exacto) y genera movimientos.
+    """
     doc = db.query(FnDocument).filter(FnDocument.DocumentID == document_id).first()
     if not doc:
         return {"error": "Documento no encontrado"}
     
+    if doc.doStatus == "COMPLETED":
+        return {"status": "skipped", "reason": "Documento ya procesado anteriormente"}
+
+    sku_map, choices_map, parent_map, variant_map = _load_product_catalog(db, database_id)
     lines = db.query(FnDocumentLn).filter(FnDocumentLn.DocumentID == document_id).all()
     created_count = 0
     
     for ln in lines:
-        if not ln.SupplyID or ln.SupplyID == "UNKNOWN":
-            continue
+        # Búsqueda de alta integridad (Match EXACTO)
+        final_supply_id = ln.SupplyID
+        match_type = "Pre-assigned"
+
+        if not final_supply_id:
+            final_supply_id, match_type = find_product_id(ln.dlDescription, choices_map)
             
+        # Si aún no existe, lo creamos
+        if final_supply_id == "UNKNOWN" or not final_supply_id:
+            # 1. Crear Maestro si no existe uno similar (usamos itTitle del bcItems)
+            # Para el maestro si permitimos un poco de difflib solo para no duplicar padres si el nombre es IDÉNTICO
+            item_id = str(uuid.uuid4()).replace('-', '')[:8].upper()
+            
+            # Verificamos si existe un producto maestro con el mismo nombre
+            master_name = ln.dlDescription[:300]
+            existing_master = db.query(BcItem).filter(BcItem.itTitle == master_name, BcItem.DatabaseID == database_id).first()
+            
+            if existing_master:
+                item_id = existing_master.ItemID
+            else:
+                new_bc_item = BcItem(
+                    ItemID=item_id,
+                    DatabaseID=database_id,
+                    itTitle=master_name,
+                    itCreatedBy="AI_BOT"
+                )
+                db.add(new_bc_item)
+            
+            # 2. Crear Variante (BcItemLn)
+            final_supply_id = str(uuid.uuid4()).replace('-', '')[:8].upper()
+            new_bc_item_ln = BcItemLn(
+                ItemLnID=final_supply_id,
+                ItemID=item_id,
+                DatabaseID=database_id,
+                lnCode="AUTO",
+                lnTitle=ln.dlDescription[:150],
+                lnQuantity=0, 
+                lnAvailable=0,
+                lnCreatedBy="AI_BOT"
+            )
+            db.add(new_bc_item_ln)
+            ln.SupplyID = final_supply_id # Actualizamos la línea con el nuevo ID
+            
+        # Generar Movimientos
         mv_id = str(uuid.uuid4()).replace('-', '')[:8].upper()
-        
         new_movement = IcMovement(
             MovementID=mv_id,
             DatabaseID=database_id,
             OriginID=(doc.IssuerID or doc.doIssuer or "")[:10],
-            ItemID=(ln.SupplyID or "")[:10],
+            ItemID=(final_supply_id or "")[:10],
             DocumentLnID=ln.DocumentLnID, 
             mvDate=doc.doDate or datetime.now(),
             mvAction="IN",        
             mvQuantity=ln.dlQuantity,
             mvStatus="POSTED",
-            mvNotes=f"Auto-generado por Factura {doc.doConsecutive}",
+            mvNotes=f"Fulfillment manual fact {doc.doConsecutive}",
             mvCreatedby="AI_BOT"
         )
         db.add(new_movement)
         
+        # Registrar Precio
         pr_id = str(uuid.uuid4()).replace('-', '')[:8].upper()
         new_price = IcPrice(
             PriceID=pr_id,
             DatabaseID=database_id,
-            ItemID=(ln.SupplyID or "")[:10],
+            ItemID=(final_supply_id or "")[:10],
             MovementID=mv_id,         
             prTitle="Ingreso",
             prDescription=(ln.dlDescription or "")[:255],
@@ -350,8 +309,8 @@ def create_inventory_movements_logic(db: Session, document_id: str, database_id:
         )
         db.add(new_price)
         
-        # Update stock in bcItemsLns
-        variant = db.query(BcItemLn).filter(BcItemLn.ItemLnID == ln.SupplyID).first()
+        # Actualizar stock
+        variant = db.query(BcItemLn).filter(BcItemLn.ItemLnID == final_supply_id).first()
         if variant:
             variant.lnQuantity = (float(variant.lnQuantity or 0)) + float(ln.dlQuantity)
             variant.lnAvailable = (float(variant.lnAvailable or 0)) + float(ln.dlQuantity)
