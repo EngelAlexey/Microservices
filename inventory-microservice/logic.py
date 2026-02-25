@@ -114,14 +114,13 @@ def find_project_id(address_text: str, project_choices: dict):
     return None
 
 def insert_document_logic(db: Session, data: dict, source_file_id: str, appsheet_doc_id: str = None, database_id: str = None):
-    """PASO 1: Digitalización y Creación de Borrador (DRAFT).
-    No crea ítems maestros ni movimientos. Solo las filas de la factura.
+    """PASO 1: Digitalización y Registro de Filas.
+    Guarda el documento y las líneas. No afecta inventario.
     """
     database_id = (database_id or "")[:10]
     header = data.get("header", {})
     lines = data.get("lines", [])
     
-    # Solo cargamos catálogo para intentar pre-asignar SupplyID si hay match EXACTO
     sku_map, choices_map, parent_map, variant_map = _load_product_catalog(db, database_id)
     project_choices = _load_project_catalog(db, database_id)
     
@@ -131,7 +130,6 @@ def insert_document_logic(db: Session, data: dict, source_file_id: str, appsheet
     issuer_id = header.get("doIssuerID")
     receptor_id = header.get("doReceptorID")
     
-    # Upsert Issuer/Receptor (No afecta inventario)
     if issuer_data and any(issuer_data.values()):
         issuer_res = upsert_company_from_invoice_logic(db, issuer_data, source_file_id, database_id, update_if_exists=False)
         if issuer_res.get("status") == "success":
@@ -175,17 +173,18 @@ def insert_document_logic(db: Session, data: dict, source_file_id: str, appsheet
     doc_obj.doTotal = header.get("TotalAmount", 0.0)
     doc_obj.doFile = source_file_id
     doc_obj.DriveID = source_file_id
-    doc_obj.doStatus = "DRAFT"
+    # Se eliminó el estado manual DRAFT a petición del usuario
     doc_obj.Bot = f"Digitalizado. Proyecto: {matched_project_id or 'N/A'}. IA: {data.get('usage', 'N/A')}"
 
-    # Limpiar líneas previas si se está re-procesando
     db.query(FnDocumentLn).filter(FnDocumentLn.DocumentID == doc_obj.DocumentID).delete()
 
     line_number = 1
     for line in lines:
         manual_desc = str(line.get("description") or "Sin descripción").strip()
-        # Intentamos match EXACTO para pre-completar SupplyID
-        supply_id, match_type = find_product_id(manual_desc, choices_map)
+        product_hint = str(line.get("product_name") or "").strip()
+        
+        # Match EXACTO inicial para sugerencia
+        supply_id, _ = find_product_id(manual_desc, choices_map)
         
         qty = float(line.get("quantity", 0))
         price_unit = float(line.get("unit_price", 0))
@@ -200,7 +199,7 @@ def insert_document_logic(db: Session, data: dict, source_file_id: str, appsheet
             DocumentID=doc_obj.DocumentID,
             DatabaseID=database_id,
             dlNumber=line_number,
-            SupplyID=supply_id if supply_id != "UNKNOWN" else None, # Se mantiene vacío si no hay match exacto
+            SupplyID=supply_id if supply_id != "UNKNOWN" else None,
             CabysID=str(line.get("cabys_candidate") or "")[:50],
             dlDescription=manual_desc,
             dlQuantity=qty,
@@ -208,59 +207,76 @@ def insert_document_logic(db: Session, data: dict, source_file_id: str, appsheet
             dlSubtotal=subtotal_ln,
             dlTaxes=tax_ln,
             dlTotal=total_ln,
-            dlObservations=f"AI Extraction Match: {match_type}"
+            # Guardamos el nombre "Maestro" sugerido por la IA para usarlo en el Paso 2
+            dlObservations=f"HINT:{product_hint}" if product_hint else None
         )
         db.add(new_ln)
         line_number += 1
 
     db.commit()
-    return {"status": "success", "document_id": doc_obj.DocumentID, "database_id": database_id}
+    return {"status": "success", "document_id": doc_obj.DocumentID}
 
 def create_inventory_movements_logic(db: Session, document_id: str, database_id: str, image_folder_id: str = None):
-    """PASO 2: Confirmación y Fulfillment.
-    Valida ítems, los crea si no existen (match exacto) y genera movimientos.
+    """PASO 2: Procesamiento de Inventario con Jerarquía Maestro-Variante.
+    1. Busca variante exacta.
+    2. Si no hay variante, busca artículo maestro (BcItem).
+    3. Crea variante bajo maestro existente o crea ambos.
     """
     doc = db.query(FnDocument).filter(FnDocument.DocumentID == document_id).first()
     if not doc:
         return {"error": "Documento no encontrado"}
     
-    if doc.doStatus == "COMPLETED":
-        return {"status": "skipped", "reason": "Documento ya procesado anteriormente"}
-
+    # Reload catalog to get latest items
     sku_map, choices_map, parent_map, variant_map = _load_product_catalog(db, database_id)
     lines = db.query(FnDocumentLn).filter(FnDocumentLn.DocumentID == document_id).all()
     created_count = 0
     
     for ln in lines:
-        # Búsqueda de alta integridad (Match EXACTO)
         final_supply_id = ln.SupplyID
-        match_type = "Pre-assigned"
-
+        
+        # Si no tiene SupplyID, intentamos match estricto de variante
         if not final_supply_id:
-            final_supply_id, match_type = find_product_id(ln.dlDescription, choices_map)
+            final_supply_id, _ = find_product_id(ln.dlDescription, choices_map)
             
-        # Si aún no existe, lo creamos
+        # Si sigue siendo desconocido, aplicamos Lógica de Jerarquía
         if final_supply_id == "UNKNOWN" or not final_supply_id:
-            # 1. Crear Maestro si no existe uno similar (usamos itTitle del bcItems)
-            # Para el maestro si permitimos un poco de difflib solo para no duplicar padres si el nombre es IDÉNTICO
-            item_id = str(uuid.uuid4()).replace('-', '')[:8].upper()
+            product_hint = ""
+            if ln.dlObservations and ln.dlObservations.startswith("HINT:"):
+                product_hint = ln.dlObservations.replace("HINT:", "").strip()
+
+            # 1. Buscar Maestro (BcItem)
+            # Intentamos match exacto del hint contra itTitle
+            existing_master_id = None
+            if product_hint:
+                master = db.query(BcItem).filter(BcItem.itTitle == product_hint, BcItem.DatabaseID == database_id).first()
+                if master:
+                    existing_master_id = master.ItemID
             
-            # Verificamos si existe un producto maestro con el mismo nombre
-            master_name = ln.dlDescription[:300]
-            existing_master = db.query(BcItem).filter(BcItem.itTitle == master_name, BcItem.DatabaseID == database_id).first()
-            
-            if existing_master:
-                item_id = existing_master.ItemID
+            # Si no hay hint o no hubo match, intentamos buscar si el nombre del padre está contenido en la descripción
+            if not existing_master_id:
+                # Verificamos si algún itTitle existente es prefijo de la descripción de la línea
+                all_masters = db.query(BcItem).filter(BcItem.DatabaseID == database_id).all()
+                for m in all_masters:
+                    if m.itTitle.strip().lower() in ln.dlDescription.strip().lower():
+                        existing_master_id = m.ItemID
+                        break
+
+            # 2. Crear o Reutilizar Maestro
+            if existing_master_id:
+                item_id = existing_master_id
+                logger.info(f"Reutilizando Maestro Identificado: {item_id} para {ln.dlDescription}")
             else:
+                item_id = str(uuid.uuid4()).replace('-', '')[:8].upper()
                 new_bc_item = BcItem(
                     ItemID=item_id,
                     DatabaseID=database_id,
-                    itTitle=master_name,
+                    itTitle=product_hint if product_hint else ln.dlDescription[:300],
                     itCreatedBy="AI_BOT"
                 )
                 db.add(new_bc_item)
-            
-            # 2. Crear Variante (BcItemLn)
+                logger.info(f"Nuevo Maestro Creado: {item_id} ({product_hint or ln.dlDescription[:30]})")
+
+            # 3. Crear Variante (BcItemLn)
             final_supply_id = str(uuid.uuid4()).replace('-', '')[:8].upper()
             new_bc_item_ln = BcItemLn(
                 ItemLnID=final_supply_id,
@@ -273,9 +289,9 @@ def create_inventory_movements_logic(db: Session, document_id: str, database_id:
                 lnCreatedBy="AI_BOT"
             )
             db.add(new_bc_item_ln)
-            ln.SupplyID = final_supply_id # Actualizamos la línea con el nuevo ID
+            ln.SupplyID = final_supply_id
             
-        # Generar Movimientos
+        # 4. Generar Movimientos y Precios
         mv_id = str(uuid.uuid4()).replace('-', '')[:8].upper()
         new_movement = IcMovement(
             MovementID=mv_id,
@@ -287,12 +303,11 @@ def create_inventory_movements_logic(db: Session, document_id: str, database_id:
             mvAction="IN",        
             mvQuantity=ln.dlQuantity,
             mvStatus="POSTED",
-            mvNotes=f"Fulfillment manual fact {doc.doConsecutive}",
+            mvNotes=f"Fulfillment fact {doc.doConsecutive}",
             mvCreatedby="AI_BOT"
         )
         db.add(new_movement)
         
-        # Registrar Precio
         pr_id = str(uuid.uuid4()).replace('-', '')[:8].upper()
         new_price = IcPrice(
             PriceID=pr_id,
@@ -309,7 +324,6 @@ def create_inventory_movements_logic(db: Session, document_id: str, database_id:
         )
         db.add(new_price)
         
-        # Actualizar stock
         variant = db.query(BcItemLn).filter(BcItemLn.ItemLnID == final_supply_id).first()
         if variant:
             variant.lnQuantity = (float(variant.lnQuantity or 0)) + float(ln.dlQuantity)
@@ -317,7 +331,6 @@ def create_inventory_movements_logic(db: Session, document_id: str, database_id:
         
         created_count += 1
         
-    doc.doStatus = "COMPLETED"
     db.commit()
     return {"status": "success", "movements_created": created_count}
 

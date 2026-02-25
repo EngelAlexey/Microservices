@@ -49,10 +49,10 @@ def _check_duplicate(file_id: str, database_id: str):
 
 @app.post("/webhook/process-drive-file")
 async def process_drive_file(payload: FilePayload, db: Session = Depends(get_db)):
-    """PASO 1: Digitalización y Registro de Borrador (DRAFT)."""
+    """PASO 1: Digitalización y Registro de Filas (Borrador)."""
     file_id = payload.file_id
     db_id = payload.database_id
-    logger.info(f"Digitalizando Borrador: {file_id} (Client: {db_id})")
+    logger.info(f"Digitalizando Factura: {file_id} (Client: {db_id})")
 
     loop = asyncio.get_event_loop()
     # Verificar duplicado
