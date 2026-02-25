@@ -108,14 +108,14 @@ class IcMovement(Base):
     MovementID = Column(String(10), primary_key=True)
     isDeleted = Column(Boolean, default=False)
     DatabaseID = Column(String(10))
-    OriginID = Column(String(10))     
+    OriginID = Column(String(10), nullable=True) # Made nullable based on creation logic
     ProjectID = Column(String(10), nullable=True)
-    ItemID = Column(String(10))       
-    DocumentLnID = Column(String(100))
+    ItemID = Column(String(10), nullable=True) # Made nullable based on creation logic
+    DocumentLnID = Column(String(150))
     mvDate = Column(DateTime, default=datetime.datetime.now)
     mvAction = Column(String(10))     
     mvQuantity = Column(DECIMAL(13, 2))
-    mvStatus = Column(String(45), default="Applied")
+    mvStatus = Column(String(45), default="POSTED") # Changed default based on creation logic
     mvNotes = Column(Text)
     mvCreatedby = Column(String(10), default="AI_BOT")
     mvCreateddate = Column(DateTime, default=datetime.datetime.now)

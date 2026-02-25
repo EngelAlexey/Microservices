@@ -304,9 +304,9 @@ def create_inventory_movements_logic(db: Session, document_id: str, database_id:
         new_movement = IcMovement(
             MovementID=mv_id,
             DatabaseID=database_id,
-            OriginID=(doc.IssuerID or doc.doIssuer or "")[:10],
+            OriginID=(doc.IssuerID or "")[:10],
             ItemID=(final_supply_id or "")[:10],
-            DocumentLnID=ln.DocumentLnID, 
+            DocumentLnID=ln.DocumentLnID,
             mvDate=doc.doDate or datetime.now(),
             mvAction="IN",        
             mvQuantity=ln.dlQuantity,
