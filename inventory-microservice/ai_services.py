@@ -104,13 +104,18 @@ def extract_invoice_data(pdf_content_bytes):
 
 _COMPANY_PROMPT = """Extract the underlying company data from this document, specifically looking for the issuer or client details.
 Focus on identifying the company that issued the invoice or the client it was billed to.
+
 Return exactly one JSON object representing the most important company found in the document (usually the issuer).
+
+Rules for names:
+1. cpName: The official legal name (Razón Social). DO NOT include commercial names or names in parentheses here.
+2. cpTitle: The commercial/trade name (Nombre de Fantasía). If the document has a name in parentheses or a distinct brand logo, put it here.
 
 Return JSON format:
 {
-    "cpName": "string or null - The official legal name of the company",
-    "cpTitle": "string or null - The commercial/trade name if different from legal name",
-    "cpIdentification": "string or null - The tax ID, VAT number, or corporate identification number",
+    "cpName": "string or null - Official legal name (e.g. 'Grupo Istmo de Papagayo S.R.L.')",
+    "cpTitle": "string or null - Commercial name (e.g. 'Hotel Four Seasons')",
+    "cpIdentification": "string or null - Tax ID / VAT number",
     "cpAddress": "string or null - Full address",
     "cpEmail": "string or null - Primary contact email",
     "cpPhone": "string or null - Primary contact phone number"

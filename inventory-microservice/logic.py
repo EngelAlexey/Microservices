@@ -2,13 +2,17 @@ from sqlalchemy.orm import Session
 from models import BcItem, BcItemLn, FnDocument, FnDocumentLn, IcMovement, IcPrice, DrProject, DrCompany, BcBrand
 import difflib
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 import logging
 from image_services import search_product_image
 from drive_services import upload_image_to_drive, get_folder_path_from_drive
 import threading
 
 logger = logging.getLogger(__name__)
+
+def get_now_ca():
+    """Returns current datetime in Central America timezone (GMT-6)."""
+    return datetime.now(timezone(timedelta(hours=-6))).replace(tzinfo=None)
 
 def fetch_and_upload_image_task(query: str, filename: str, folder_id: str, item_id: str = None):
     """Tarea en background para descargar y subir a Drive sin bloquear el request"""
@@ -156,11 +160,14 @@ def insert_document_logic(db: Session, data: dict, source_file_id: str, appsheet
         doc_obj = FnDocument(DocumentID=doc_id)
         db.add(doc_obj)
     
+    now = get_now_ca()
     try:
         doc_date_str = header.get("doDate")
-        doc_date = datetime.strptime(doc_date_str, "%Y-%m-%d").date() if doc_date_str else datetime.now().date()
+        doc_date = datetime.strptime(doc_date_str, "%Y-%m-%d").date() if doc_date_str else now.date()
     except:
-        doc_date = datetime.now().date()
+        doc_date = now.date()
+
+    doc_obj.doCreatedAt = now
 
     doc_obj.DatabaseID = database_id  
     doc_obj.doDate = doc_date
@@ -294,13 +301,18 @@ def create_inventory_movements_logic(db: Session, document_id: str, database_id:
                 item_id = existing_master_id
                 logger.info(f"Reutilizando Maestro Identificado: {item_id} para {ln.dlDescription}")
             else:
+                now = get_now_ca()
                 item_id = str(uuid.uuid4()).replace('-', '')[:8].upper()
                 new_bc_item = BcItem(
                     ItemID=item_id,
                     DatabaseID=database_id,
                     itTitle=product_hint if product_hint else ln.dlDescription[:300],
                     itBrand=brand_id,
-                    itCreatedBy="AI_BOT"
+                    itStatus=True,
+                    itCreatedBy="AI_BOT",
+                    itCreatedAt=now,
+                    itModifiedBy="AI_BOT",
+                    itModifiedAt=now
                 )
                 db.add(new_bc_item)
                 logger.info(f"Nuevo Maestro Creado: {item_id} ({product_hint or ln.dlDescription[:30]})")
@@ -320,6 +332,7 @@ def create_inventory_movements_logic(db: Session, document_id: str, database_id:
                     t.start()
 
             # 3. Crear Variante (BcItemLn)
+            now = get_now_ca()
             final_supply_id = str(uuid.uuid4()).replace('-', '')[:8].upper()
             new_bc_item_ln = BcItemLn(
                 ItemLnID=final_supply_id,
@@ -329,12 +342,16 @@ def create_inventory_movements_logic(db: Session, document_id: str, database_id:
                 lnTitle=ln.dlDescription[:150],
                 lnQuantity=0, 
                 lnAvailable=0,
-                lnCreatedBy="AI_BOT"
+                lnCreatedBy="AI_BOT",
+                lnCreatedAt=now,
+                lnModifiedBy="AI_BOT",
+                lnModifiedAt=now
             )
             db.add(new_bc_item_ln)
             ln.SupplyID = final_supply_id
             
         # 4. Generar Movimientos y Precios
+        now = get_now_ca()
         mv_id = str(uuid.uuid4()).replace('-', '')[:8].upper()
         new_movement = IcMovement(
             MovementID=mv_id,
@@ -343,12 +360,13 @@ def create_inventory_movements_logic(db: Session, document_id: str, database_id:
             ProjectID=(project_id or "")[:10] or None,
             ItemID=(final_supply_id or "")[:10],
             DocumentLnID=ln.DocumentLnID,
-            mvDate=doc.doDate or datetime.now(),
+            mvDate=doc.doDate or now,
             mvAction="IN",        
             mvQuantity=ln.dlQuantity,
             mvStatus="POSTED",
             mvNotes=f"Fulfillment fact {doc.doConsecutive}",
-            mvCreatedby="AI_BOT"
+            mvCreatedby="AI_BOT",
+            mvCreateddate=now
         )
         db.add(new_movement)
         
@@ -365,7 +383,10 @@ def create_inventory_movements_logic(db: Session, document_id: str, database_id:
             prPrice=ln.dlUnitPrice,
             prTax=ln.dlTaxes,
             prTotal=ln.dlTotal,
-            prCreatedby="AI_BOT"
+            prCreatedby="AI_BOT",
+            prCreateddate=now,
+            prModifiedby="AI_BOT",
+            prModifieddate=now
         )
         db.add(new_price)
         
@@ -443,6 +464,18 @@ def upsert_company_from_invoice_logic(db: Session, data: dict, source_file_id: s
     raw_name = str(data.get("cpName") or "").strip()
     raw_title = str(data.get("cpTitle") or "").strip()
     
+    # Regex fallback: si cpName contiene paréntesis, intentar separar
+    import re
+    if "(" in raw_name and ")" in raw_name:
+        match = re.search(r"^(.*?)\s*\((.*?)\)", raw_name)
+        if match:
+            extracted_legal = match.group(1).strip()
+            extracted_fantasy = match.group(2).strip()
+            if extracted_legal:
+                raw_name = extracted_legal
+            if extracted_fantasy and not raw_title:
+                raw_title = extracted_fantasy
+
     # Fallback: si falta uno, usar el otro
     final_name = raw_name or raw_title
     final_title = raw_title or raw_name or raw_title
@@ -465,6 +498,13 @@ def upsert_company_from_invoice_logic(db: Session, data: dict, source_file_id: s
         
     company_obj.cpBot = f"Procesado c/IA. Uso: {data.get('usage', 'N/A')}"
     
+    now = get_now_ca()
+    if is_new:
+        company_obj.cpCreatedAt = now
+    else:
+        company_obj.cpModifiedby = "AI_BOT"
+        company_obj.cpModifiedAt = now
+        
     db.commit()
     
     action = "inserted" if is_new else "updated"
@@ -526,6 +566,8 @@ def create_item_from_url_logic(db: Session, data: dict, image_url: str, database
     it_description = str(data.get("itDescription") or "").strip()
     it_observations = str(data.get("itObservations") or "").strip()
     
+    now = get_now_ca()
+
     if not it_title:
         return {"status": "error", "reason": "No se pudo extraer el nombre del producto"}
     
@@ -555,6 +597,9 @@ def create_item_from_url_logic(db: Session, data: dict, image_url: str, database
         if it_title:
             existing.itTitle = it_title
         existing.itStatus = True
+        # Auditoría
+        existing.itModifiedBy = "AI_BOT"
+        existing.itModifiedAt = now
         # Completar los demás campos si estaban vacíos
         if brand_id and not existing.itBrand:
             existing.itBrand = brand_id
@@ -590,6 +635,9 @@ def create_item_from_url_logic(db: Session, data: dict, image_url: str, database
             # la reemplaza con el nombre del archivo Drive cuando termina la subida.
             itImage=image_url[:255] if image_url else None,
             itCreatedBy="AI_BOT",
+            itCreatedAt=now,
+            itModifiedBy="AI_BOT",
+            itModifiedAt=now,
             Bot=f"Importado desde URL. IA: {data.get('usage', 'N/A')}"
         )
         db.add(new_item)
