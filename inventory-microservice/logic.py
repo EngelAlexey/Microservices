@@ -4,6 +4,8 @@ import difflib
 import uuid
 from datetime import datetime, timedelta, timezone
 import logging
+import re
+from sqlalchemy import func
 from image_services import search_product_image
 from drive_services import upload_image_to_drive, get_folder_path_from_drive
 import threading
@@ -168,7 +170,7 @@ def insert_document_logic(db: Session, data: dict, source_file_id: str, appsheet
         doc_date = now.date()
 
     doc_obj.doCreatedAt = now
-
+    doc_obj.doCreatedBy = "AI_BOT"
     doc_obj.DatabaseID = database_id  
     doc_obj.doDate = doc_date
     doc_obj.doConsecutive = header.get("doConsecutive")
@@ -223,8 +225,8 @@ def insert_document_logic(db: Session, data: dict, source_file_id: str, appsheet
             dlTaxes=tax_ln,
             dlTotal=total_ln,
             # Guardamos el nombre "Maestro" sugerido por la IA para usarlo en el Paso 2
-            # Guardamos también la marca sugerida por la IA
-            dlObservations=f"HINT:{product_hint}|BRAND:{line.get('brand') or ''}" if product_hint or line.get('brand') else None
+            # Guardamos también la marca y el modelo sugeridos por la IA
+            dlObservations=f"HINT:{product_hint}|BRAND:{line.get('brand') or ''}|MODEL:{line.get('model') or ''}" if product_hint or line.get('brand') or line.get('model') else None
         )
         db.add(new_ln)
         line_number += 1
@@ -258,14 +260,14 @@ def create_inventory_movements_logic(db: Session, document_id: str, database_id:
         if final_supply_id == "UNKNOWN" or not final_supply_id:
             product_hint = ""
             brand_hint = ""
+            model_hint = ""
             if ln.dlObservations:
                 if "HINT:" in ln.dlObservations:
-                    parts = ln.dlObservations.split("|")
-                    for p in parts:
-                        if p.startswith("HINT:"):
-                            product_hint = p.replace("HINT:", "").strip()
-                        if p.startswith("BRAND:"):
-                            brand_hint = p.replace("BRAND:", "").strip()
+                    product_hint = ln.dlObservations.split("HINT:")[1].split("|")[0].strip()
+                if "BRAND:" in ln.dlObservations:
+                    brand_hint = ln.dlObservations.split("BRAND:")[1].split("|")[0].strip()
+                if "MODEL:" in ln.dlObservations:
+                    model_hint = ln.dlObservations.split("MODEL:")[1].split("|")[0].strip()
 
             # 1. Buscar o Crear Marca
             brand_id = None
@@ -308,6 +310,7 @@ def create_inventory_movements_logic(db: Session, document_id: str, database_id:
                     DatabaseID=database_id,
                     itTitle=product_hint if product_hint else ln.dlDescription[:300],
                     itBrand=brand_id,
+                    itModel=model_hint[:45] if model_hint else None,
                     itStatus=True,
                     itCreatedBy="AI_BOT",
                     itCreatedAt=now,
@@ -334,12 +337,19 @@ def create_inventory_movements_logic(db: Session, document_id: str, database_id:
             # 3. Crear Variante (BcItemLn)
             now = get_now_ca()
             final_supply_id = str(uuid.uuid4()).replace('-', '')[:8].upper()
+            
+            # El título de la variante debería incluir la presentación (700ml, etc) si existe
+            ln_variant_title = ln.dlDescription[:150]
+            if model_hint and model_hint.lower() not in ln_variant_title.lower():
+                ln_variant_title = f"{ln_variant_title} {model_hint}"[:150]
+
             new_bc_item_ln = BcItemLn(
                 ItemLnID=final_supply_id,
                 ItemID=item_id,
                 DatabaseID=database_id,
                 lnCode=final_supply_id,  # Unique code per variant to avoid duplicate key constraint
-                lnTitle=ln.dlDescription[:150],
+                lnTitle=ln_variant_title,
+                lnSize=model_hint[:100] if model_hint else None,
                 lnQuantity=0, 
                 lnAvailable=0,
                 lnCreatedBy="AI_BOT",
@@ -455,7 +465,7 @@ def upsert_company_from_invoice_logic(db: Session, data: dict, source_file_id: s
             }
             
         company_obj.cpModifiedby = "AI_BOT"
-        company_obj.cpModifiedAt = datetime.now()
+        company_obj.cpModifiedAt = get_now_ca()
 
     company_obj.DatabaseID = (database_id or "")[:50]
     company_obj.cpFile = (source_file_id or "")[:255]
@@ -465,7 +475,6 @@ def upsert_company_from_invoice_logic(db: Session, data: dict, source_file_id: s
     raw_title = str(data.get("cpTitle") or "").strip()
     
     # Regex fallback: si cpName contiene paréntesis, intentar separar
-    import re
     if "(" in raw_name and ")" in raw_name:
         match = re.search(r"^(.*?)\s*\((.*?)\)", raw_name)
         if match:
@@ -523,10 +532,9 @@ def upsert_brand_logic(db: Session, brand_name: str, database_id: str):
         
     brand_name = brand_name.strip()
     database_id = (database_id or "")[:150]
-    
-    # Buscar match exacto (case-insensitive)
+    # Buscar por título exacto (case insensitive)
     brand_obj = db.query(BcBrand).filter(
-        BcBrand.brTitle == brand_name,
+        func.lower(BcBrand.brTitle) == brand_name.lower(),
         BcBrand.DatabaseID == database_id,
         BcBrand.isDeleted.isnot(True)
     ).first()
@@ -613,6 +621,8 @@ def create_item_from_url_logic(db: Session, data: dict, image_url: str, database
             existing.itModel = it_model
         if it_observations and not existing.itObservations:
             existing.itObservations = it_observations
+        if data.get("itWebsite") and not existing.itWebsite:
+            existing.itWebsite = str(data.get("itWebsite"))[:500]
         # itImage: asignar la URL de la imagen de inmediato para que AppSheet la vea al instante.
         # El hilo de background la actualizará con el nombre del archivo Drive cuando termine.
         if image_url and not existing.itImage:
@@ -629,6 +639,7 @@ def create_item_from_url_logic(db: Session, data: dict, image_url: str, database
             itCategory=it_category or None,
             itSubcategory=it_subcategory or None,
             itModel=it_model or None,
+            itWebsite=str(data.get("itWebsite"))[:500] if data.get("itWebsite") else None,
             itObservations=it_observations or None,
             itStatus=True,
             # itImage: URL directa como placeholder inmediato; el hilo de background
@@ -645,8 +656,45 @@ def create_item_from_url_logic(db: Session, data: dict, image_url: str, database
         action = "inserted"
         logger.info(f"Nuevo Maestro Creado desde URL: {item_id} ({it_title})")
 
+    # 3. Asegurar la Variante (BcItemLn) para esta presentación específica
+    # Si tenemos it_model (e.g. '700ml'), creamos una variante que lo contenga.
+    ln_title = f"{it_title} {it_model}".strip() if it_model else it_title
+    existing_ln = db.query(BcItemLn).filter(
+        BcItemLn.ItemID == item_id,
+        BcItemLn.lnTitle == ln_title[:150],
+        BcItemLn.DatabaseID == database_id
+    ).first()
     
-    # 3. Descargar y subir imagen en background
+    if not existing_ln:
+        ln_id = str(uuid.uuid4()).replace('-', '')[:8].upper()
+        new_ln = BcItemLn(
+            ItemLnID=ln_id,
+            ItemID=item_id,
+            DatabaseID=database_id,
+            lnCode=ln_id,
+            lnTitle=ln_title[:150],
+            lnSize=it_model[:100] if it_model else None,
+            lnQuantity=0,
+            lnAvailable=0,
+            lnStatus=True,
+            lnCreatedBy="AI_BOT",
+            lnCreatedAt=now,
+            lnModifiedBy="AI_BOT",
+            lnModifiedAt=now,
+            Bot=f"Variante auto-generada desde URL. IA: {data.get('usage', 'N/A')}"
+        )
+        db.add(new_ln)
+        db.commit()
+        logger.info(f"Nueva Variante Creada: {ln_id} ({ln_title})")
+    else:
+        # Actualizar variante existente si fuera necesario
+        existing_ln.lnModifiedBy = "AI_BOT"
+        existing_ln.lnModifiedAt = now
+        if not existing_ln.lnSize and it_model:
+            existing_ln.lnSize = it_model[:100]
+        db.commit()
+
+    # 4. Descargar y subir imagen en background
     if image_url and image_folder_id:
         img_filename = f"{item_id}.jpg"
         

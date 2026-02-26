@@ -57,6 +57,7 @@ Return JSON:
             "description": "string",
             "product_name": "string (Generic)",
             "brand": "string (Extract brand name if present)",
+            "model": "string (Variant/Presentation like 700ml, 1L, etc.)",
             "quantity": 0.0, 
             "unit_price": 0.0,
             "discount_amount": 0.0,
