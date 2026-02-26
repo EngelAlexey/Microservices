@@ -551,7 +551,11 @@ def create_item_from_url_logic(db: Session, data: dict, image_url: str, database
     if existing:
         item_id = existing.ItemID
         logger.info(f"Maestro existente encontrado: {item_id} ({it_title})")
-        # Actualizar campos que podrían haber mejorado
+        # Siempre actualizamos itTitle e itStatus (la fila de AppSheet viene vacía)
+        if it_title:
+            existing.itTitle = it_title
+        existing.itStatus = True
+        # Completar los demás campos si estaban vacíos
         if brand_id and not existing.itBrand:
             existing.itBrand = brand_id
         if it_description and not existing.itDescription:
@@ -560,6 +564,14 @@ def create_item_from_url_logic(db: Session, data: dict, image_url: str, database
             existing.itCategory = it_category
         if it_subcategory and not existing.itSubcategory:
             existing.itSubcategory = it_subcategory
+        if it_model and not existing.itModel:
+            existing.itModel = it_model
+        if it_observations and not existing.itObservations:
+            existing.itObservations = it_observations
+        # itImage: asignar la URL de la imagen de inmediato para que AppSheet la vea al instante.
+        # El hilo de background la actualizará con el nombre del archivo Drive cuando termine.
+        if image_url and not existing.itImage:
+            existing.itImage = image_url[:255]
         db.commit()
     else:
         item_id = str(uuid.uuid4()).replace('-', '')[:8].upper()
@@ -573,6 +585,10 @@ def create_item_from_url_logic(db: Session, data: dict, image_url: str, database
             itSubcategory=it_subcategory or None,
             itModel=it_model or None,
             itObservations=it_observations or None,
+            itStatus=True,
+            # itImage: URL directa como placeholder inmediato; el hilo de background
+            # la reemplaza con el nombre del archivo Drive cuando termina la subida.
+            itImage=image_url[:255] if image_url else None,
             itCreatedBy="AI_BOT",
             Bot=f"Importado desde URL. IA: {data.get('usage', 'N/A')}"
         )
@@ -580,6 +596,7 @@ def create_item_from_url_logic(db: Session, data: dict, image_url: str, database
         db.commit()
         action = "inserted"
         logger.info(f"Nuevo Maestro Creado desde URL: {item_id} ({it_title})")
+
     
     # 3. Descargar y subir imagen en background
     if image_url and image_folder_id:
