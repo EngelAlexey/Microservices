@@ -275,10 +275,17 @@ def create_inventory_movements_logic(db: Session, document_id: str, database_id:
             
             # Si no hay hint o no hubo match, intentamos buscar si el nombre del padre está contenido en la descripción
             if not existing_master_id:
-                # Verificamos si algún itTitle existente es prefijo de la descripción de la línea
+                # Verificamos si algún itTitle existente es prefijo de la descripción de la línea.
+                # IMPORTANTE: solo reutilizamos el maestro si su nombre es suficientemente específico
+                # (>5 chars) Y comparte la misma marca, para evitar que un maestro genérico como
+                # "Bourbon" sea reutilizado entre marcas distintas (Yellowstone, Ezra Brooks, etc.)
                 all_masters = db.query(BcItem).filter(BcItem.DatabaseID == database_id).all()
                 for m in all_masters:
-                    if m.itTitle.strip().lower() in ln.dlDescription.strip().lower():
+                    master_title = (m.itTitle or "").strip().lower()
+                    desc_lower = ln.dlDescription.strip().lower()
+                    title_is_specific = len(master_title) > 5
+                    same_brand = (m.itBrand == brand_id) if brand_id else (m.itBrand is None)
+                    if title_is_specific and same_brand and master_title in desc_lower:
                         existing_master_id = m.ItemID
                         break
 
@@ -298,9 +305,12 @@ def create_inventory_movements_logic(db: Session, document_id: str, database_id:
                 db.add(new_bc_item)
                 logger.info(f"Nuevo Maestro Creado: {item_id} ({product_hint or ln.dlDescription[:30]})")
                 
-                # Disparar descarga de imagen en background
+                # Disparar descarga de imagen en background.
+                # La búsqueda usa marca + nombre del producto para ser específica
+                # (ej: "Yellowstone Bourbon" en vez de solo "Bourbon")
                 if image_folder_id:
-                    img_query = product_hint or ln.dlDescription[:60]
+                    base_query = product_hint or ln.dlDescription[:60]
+                    img_query = f"{brand_hint} {base_query}".strip() if brand_hint else base_query
                     img_filename = f"{item_id}.jpg"
                     t = threading.Thread(
                         target=fetch_and_upload_image_task,
@@ -426,19 +436,28 @@ def upsert_company_from_invoice_logic(db: Session, data: dict, source_file_id: s
         company_obj.cpModifiedby = "AI_BOT"
         company_obj.cpModifiedAt = datetime.now()
 
-    company_obj.DatabaseID = database_id
-    company_obj.cpFile = source_file_id
+    company_obj.DatabaseID = (database_id or "")[:50]
+    company_obj.cpFile = (source_file_id or "")[:255]
     
-    if data.get("cpName"):
-        company_obj.cpName = str(data.get("cpName"))[:300]
-    if data.get("cpTitle"):
-        company_obj.cpTitle = str(data.get("cpTitle"))[:300]
+    # Extraer valores y fallbacks
+    raw_name = str(data.get("cpName") or "").strip()
+    raw_title = str(data.get("cpTitle") or "").strip()
+    
+    # Fallback: si falta uno, usar el otro
+    final_name = raw_name or raw_title
+    final_title = raw_title or raw_name or raw_title
+    
+    if final_name:
+        company_obj.cpName = final_name[:200]
+    if final_title:
+        company_obj.cpTitle = final_title[:150]
+        
     if data.get("cpCategory"):
-        company_obj.cpCategory = str(data.get("cpCategory"))[:150]
+        company_obj.cpCategory = str(data.get("cpCategory"))[:100]
     if data.get("cpIdentification"):
-        company_obj.cpIdentification = str(data.get("cpIdentification"))[:300]
+        company_obj.cpIdentification = str(data.get("cpIdentification"))[:100]
     if data.get("cpAddress"):
-        company_obj.cpAddress = str(data.get("cpAddress"))[:150]
+        company_obj.cpAddress = str(data.get("cpAddress"))[:500]
     if data.get("cpEmail"):
         company_obj.cpEmail = str(data.get("cpEmail"))[:150]
     if data.get("cpPhone"):
