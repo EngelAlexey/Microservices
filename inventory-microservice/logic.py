@@ -1,5 +1,5 @@
 from sqlalchemy.orm import Session
-from models import BcItem, BcItemLn, FnDocument, FnDocumentLn, IcMovement, IcPrice, DrProject, DrCompany
+from models import BcItem, BcItemLn, FnDocument, FnDocumentLn, IcMovement, IcPrice, DrProject, DrCompany, BcBrand
 import difflib
 import uuid
 from datetime import datetime
@@ -216,7 +216,8 @@ def insert_document_logic(db: Session, data: dict, source_file_id: str, appsheet
             dlTaxes=tax_ln,
             dlTotal=total_ln,
             # Guardamos el nombre "Maestro" sugerido por la IA para usarlo en el Paso 2
-            dlObservations=f"HINT:{product_hint}" if product_hint else None
+            # Guardamos también la marca sugerida por la IA
+            dlObservations=f"HINT:{product_hint}|BRAND:{line.get('brand') or ''}" if product_hint or line.get('brand') else None
         )
         db.add(new_ln)
         line_number += 1
@@ -249,10 +250,22 @@ def create_inventory_movements_logic(db: Session, document_id: str, database_id:
         # Si sigue siendo desconocido, aplicamos Lógica de Jerarquía
         if final_supply_id == "UNKNOWN" or not final_supply_id:
             product_hint = ""
-            if ln.dlObservations and ln.dlObservations.startswith("HINT:"):
-                product_hint = ln.dlObservations.replace("HINT:", "").strip()
+            brand_hint = ""
+            if ln.dlObservations:
+                if "HINT:" in ln.dlObservations:
+                    parts = ln.dlObservations.split("|")
+                    for p in parts:
+                        if p.startswith("HINT:"):
+                            product_hint = p.replace("HINT:", "").strip()
+                        if p.startswith("BRAND:"):
+                            brand_hint = p.replace("BRAND:", "").strip()
 
-            # 1. Buscar Maestro (BcItem)
+            # 1. Buscar o Crear Marca
+            brand_id = None
+            if brand_hint:
+                brand_id = upsert_brand_logic(db, brand_hint, database_id)
+
+            # 2. Buscar Maestro (BcItem)
             # Intentamos match exacto del hint contra itTitle
             existing_master_id = None
             if product_hint:
@@ -279,6 +292,7 @@ def create_inventory_movements_logic(db: Session, document_id: str, database_id:
                     ItemID=item_id,
                     DatabaseID=database_id,
                     itTitle=product_hint if product_hint else ln.dlDescription[:300],
+                    itBrand=brand_id,
                     itCreatedBy="AI_BOT"
                 )
                 db.add(new_bc_item)
@@ -442,3 +456,34 @@ def upsert_company_from_invoice_logic(db: Session, data: dict, source_file_id: s
         "company_name": company_obj.cpName,
         "database_id": database_id
     }
+
+def upsert_brand_logic(db: Session, brand_name: str, database_id: str):
+    """Busca una marca por nombre, si no existe la crea."""
+    if not brand_name:
+        return None
+        
+    brand_name = brand_name.strip()
+    database_id = (database_id or "")[:150]
+    
+    # Buscar match exacto (case-insensitive)
+    brand_obj = db.query(BcBrand).filter(
+        BcBrand.brTitle == brand_name,
+        BcBrand.DatabaseID == database_id,
+        BcBrand.isDeleted.isnot(True)
+    ).first()
+    
+    if brand_obj:
+        return brand_obj.BrandID
+        
+    # Si no existe, crear con datos mínimos
+    brand_id = str(uuid.uuid4())[:10].upper()
+    new_brand = BcBrand(
+        BrandID=brand_id,
+        DatabaseID=database_id,
+        brTitle=brand_name,
+        isDeleted=False
+    )
+    db.add(new_brand)
+    db.commit()
+    logger.info(f"Nueva Marca Creada: {brand_id} ({brand_name})")
+    return brand_id

@@ -24,6 +24,18 @@ class BcItem(Base):
     DriveID = Column(String(100), nullable=True)
     Bot = Column(String(100))
 
+class BcBrand(Base):
+    __tablename__ = "bcBrands"
+    BrandID = Column(String(300), primary_key=True)
+    isDeleted = Column(Boolean, default=False)
+    DatabaseID = Column(String(150))
+    brTitle = Column(String(300))
+    brDescription = Column(Text)
+    brUrl = Column(String(300))
+    brCategories = Column(String(1000))
+    brSVG = Column(Text)
+    brImage = Column(String(300))
+
 class BcItemLn(Base):
     __tablename__ = "bcItemsLns"
     ItemLnID = Column(String(20), primary_key=True)

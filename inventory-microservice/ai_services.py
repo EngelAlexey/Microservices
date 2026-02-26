@@ -56,6 +56,7 @@ Return JSON:
             "cabys_candidate": "string",
             "description": "string",
             "product_name": "string (Generic)",
+            "brand": "string (Extract brand name if present)",
             "quantity": 0.0, 
             "unit_price": 0.0,
             "discount_amount": 0.0,
