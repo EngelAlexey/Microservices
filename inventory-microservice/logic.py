@@ -506,3 +506,118 @@ def upsert_brand_logic(db: Session, brand_name: str, database_id: str):
     db.commit()
     logger.info(f"Nueva Marca Creada: {brand_id} ({brand_name})")
     return brand_id
+
+def create_item_from_url_logic(db: Session, data: dict, image_url: str, database_id: str, image_folder_id: str = None, item_id: str = None):
+    """
+    Creates or updates a BcItem (product master) from data extracted from a product URL.
+    - If item_id is provided, updates that specific record (AppSheet pre-created row).
+    - Otherwise, checks by title to avoid duplicates.
+    - Upserts brand.
+    - Spawns a background thread to download and upload the product image.
+    Returns a dict with status and item details.
+    """
+    database_id = (database_id or "")[:10]
+    
+    it_title = str(data.get("itTitle") or "").strip()[:300]
+    it_brand_name = str(data.get("itBrand") or "").strip()
+    it_category = str(data.get("itCategory") or "").strip()[:45]
+    it_subcategory = str(data.get("itSubcategory") or "").strip()[:45]
+    it_model = str(data.get("itModel") or "").strip()[:45]
+    it_description = str(data.get("itDescription") or "").strip()
+    it_observations = str(data.get("itObservations") or "").strip()
+    
+    if not it_title:
+        return {"status": "error", "reason": "No se pudo extraer el nombre del producto"}
+    
+    # 1. Upsert de marca
+    brand_id = None
+    if it_brand_name:
+        brand_id = upsert_brand_logic(db, it_brand_name, database_id)
+    
+    # 2. Buscar maestro: primero por item_id provisto (fila pre-creada por AppSheet),
+    # luego por título exacto para evitar duplicados
+    existing = None
+    if item_id:
+        existing = db.query(BcItem).filter(BcItem.ItemID == item_id).first()
+    
+    if not existing:
+        existing = db.query(BcItem).filter(
+            BcItem.itTitle == it_title,
+            BcItem.DatabaseID == database_id,
+            BcItem.isDeleted.isnot(True)
+        ).first()
+    
+    action = "found"
+    if existing:
+        item_id = existing.ItemID
+        logger.info(f"Maestro existente encontrado: {item_id} ({it_title})")
+        # Actualizar campos que podrían haber mejorado
+        if brand_id and not existing.itBrand:
+            existing.itBrand = brand_id
+        if it_description and not existing.itDescription:
+            existing.itDescription = it_description
+        if it_category and not existing.itCategory:
+            existing.itCategory = it_category
+        if it_subcategory and not existing.itSubcategory:
+            existing.itSubcategory = it_subcategory
+        db.commit()
+    else:
+        item_id = str(uuid.uuid4()).replace('-', '')[:8].upper()
+        new_item = BcItem(
+            ItemID=item_id,
+            DatabaseID=database_id,
+            itTitle=it_title,
+            itDescription=it_description or None,
+            itBrand=brand_id,
+            itCategory=it_category or None,
+            itSubcategory=it_subcategory or None,
+            itModel=it_model or None,
+            itObservations=it_observations or None,
+            itCreatedBy="AI_BOT",
+            Bot=f"Importado desde URL. IA: {data.get('usage', 'N/A')}"
+        )
+        db.add(new_item)
+        db.commit()
+        action = "inserted"
+        logger.info(f"Nuevo Maestro Creado desde URL: {item_id} ({it_title})")
+    
+    # 3. Descargar y subir imagen en background
+    if image_url and image_folder_id:
+        img_filename = f"{item_id}.jpg"
+        
+        def upload_scraped_image(img_url, filename, folder_id, iid):
+            from scrape_services import download_image_from_url
+            img_bytes, content_type = download_image_from_url(img_url)
+            if img_bytes:
+                drive_file_id = upload_image_to_drive(img_bytes, filename, content_type, folder_id)
+                if drive_file_id:
+                    from database import SessionLocal
+                    s = SessionLocal()
+                    try:
+                        item = s.query(BcItem).filter(BcItem.ItemID == iid).first()
+                        if item:
+                            item.DriveID = drive_file_id
+                            item.itImage = filename
+                            s.commit()
+                            logger.info(f"Imagen URL subida a Drive: {iid} -> {drive_file_id}")
+                    finally:
+                        s.close()
+            else:
+                logger.warning(f"No se pudo descargar imagen desde URL: {img_url}")
+        
+        t = threading.Thread(
+            target=upload_scraped_image,
+            args=(image_url, img_filename, image_folder_id, item_id),
+            daemon=True
+        )
+        t.start()
+    
+    return {
+        "status": "success",
+        "action": action,
+        "item_id": item_id,
+        "item_title": it_title,
+        "brand_id": brand_id,
+        "brand_name": it_brand_name or None,
+        "database_id": database_id
+    }

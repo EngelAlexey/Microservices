@@ -147,3 +147,59 @@ def extract_company_data(pdf_content_bytes):
     except Exception as e:
         print(f"Error parsing Gemini JSON for company data: {e}")
         return None
+
+_PRODUCT_URL_PROMPT = """You are a product catalog extraction assistant.
+You will receive raw HTML from an e-commerce product page. Extract all available structured product data.
+
+Rules:
+1. If a field is not found, use null.
+2. For the price, extract only the numeric value (no currency symbols).
+3. Brand should be the manufacturer/brand of the product, not the store.
+4. Category should be a broad category (e.g., Spirits, Wine, Beer, Electronics, etc.).
+5. Subcategory should be a more specific type (e.g., Gin, Bourbon, IPA, etc.).
+6. model should be the specific variant or presentation (e.g., '700ml', 'Wild Berry').
+7. Extract all tags/labels if available.
+
+Return JSON format:
+{
+    "itTitle": "Generic product name (without brand or size)",
+    "itDescription": "Full product description",
+    "itBrand": "Brand name",
+    "itCategory": "Broad category",
+    "itSubcategory": "Specific subcategory",
+    "itModel": "Variant or presentation (e.g. 700ml, Wild Berry)",
+    "itObservations": "Additional notes, tasting notes, aromas, etc."
+}"""
+
+def extract_product_from_html(html_text: str):
+    """Uses Gemini to extract structured product data from scraped HTML."""
+    try:
+        # Trim HTML to avoid exceeding token limits
+        # We keep first 50k chars which usually covers the product detail section
+        trimmed_html = html_text[:50000]
+        
+        response = _client.models.generate_content(
+            model='gemini-2.5-flash',
+            contents=[trimmed_html, _PRODUCT_URL_PROMPT],
+            config=types.GenerateContentConfig(
+                response_mime_type="application/json",
+                temperature=0.1,
+                thinking_config=types.ThinkingConfig(
+                    thinking_budget=0
+                ),
+            )
+        )
+        
+        text = response.text.replace('```json', '').replace('```', '')
+        data = json.loads(text)
+        
+        usage = response.usage_metadata
+        data['usage'] = {
+            'prompt_tokens': usage.prompt_token_count,
+            'candidates_tokens': usage.candidates_token_count,
+            'total_tokens': usage.total_token_count
+        }
+        return data
+    except Exception as e:
+        print(f"Error parsing Gemini JSON for product URL data: {e}")
+        return None

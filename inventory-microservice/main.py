@@ -9,9 +9,10 @@ from sqlalchemy.orm import Session
 
 from database import get_db, engine, Base, SessionLocal
 from models import FnDocument 
-from ai_services import extract_invoice_data, extract_company_data
-from logic import insert_document_logic, upsert_company_from_invoice_logic
+from ai_services import extract_invoice_data, extract_company_data, extract_product_from_html
+from logic import insert_document_logic, upsert_company_from_invoice_logic, create_item_from_url_logic
 from drive_services import download_with_validation, resolve_file_id
+from scrape_services import scrape_product_page
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -31,6 +32,12 @@ class MovementPayload(BaseModel):
     database_id: str
     image_folder_id: str = None
     project_id: str = None
+
+class UrlPayload(BaseModel):
+    url: str
+    database_id: str
+    image_folder_id: str = None
+    item_id: str = None
 
 @app.get("/")
 def read_root():
@@ -112,6 +119,40 @@ async def extract_company(payload: FilePayload, db: Session = Depends(get_db)):
     if not data: raise HTTPException(status_code=422)
     result = upsert_company_from_invoice_logic(db, data, file_id, payload.database_id, payload.doc_id)
     return {"status": "success", "data": result}
+
+@app.post("/webhook/extract-from-url")
+async def extract_from_url(payload: UrlPayload, db: Session = Depends(get_db)):
+    """Extrae datos de producto desde una URL pública y lo registra en el catálogo."""
+    logger.info(f"Extrayendo producto desde URL: {payload.url} (Client: {payload.database_id})")
+    
+    loop = asyncio.get_event_loop()
+    
+    # 1. Scraping del HTML y detección de imagen
+    html, image_url = await loop.run_in_executor(_executor, scrape_product_page, payload.url)
+    if not html:
+        raise HTTPException(status_code=422, detail="No se pudo acceder a la URL proporcionada")
+    
+    # 2. Extracción de datos con IA
+    data = extract_product_from_html(html)
+    if not data:
+        raise HTTPException(status_code=422, detail="Fallo extracción IA desde HTML")
+    
+    logger.info(f"Datos extraídos: {data.get('itTitle')} | Marca: {data.get('itBrand')} | Imagen: {image_url}")
+    
+    # 3. Crear o encontrar el producto en el catálogo
+    try:
+        img_folder = payload.image_folder_id or os.environ.get("DEFAULT_IMAGE_FOLDER_ID")
+        result = create_item_from_url_logic(
+            db, data,
+            image_url=image_url,
+            database_id=payload.database_id,
+            image_folder_id=img_folder,
+            item_id=payload.item_id
+        )
+        return {"status": "success", "source_url": payload.url, "data": result}
+    except Exception as e:
+        logger.error(f"Error procesando URL: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":
     import uvicorn

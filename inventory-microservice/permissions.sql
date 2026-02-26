@@ -1,2 +1,0 @@
-GRANT SELECT, INSERT, UPDATE ON bcBrands TO 'bayco_api'@'%';
-FLUSH PRIVILEGES;
