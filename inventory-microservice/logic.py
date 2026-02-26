@@ -505,7 +505,7 @@ def upsert_company_from_invoice_logic(db: Session, data: dict, source_file_id: s
     if data.get("cpPhone"):
         company_obj.cpPhone = str(data.get("cpPhone"))[:100]
         
-    company_obj.cpBot = f"Procesado c/IA. Uso: {data.get('usage', 'N/A')}"
+    company_obj.cpBot = "Procesado c/IA"
     
     now = get_now_ca()
     if is_new:
@@ -649,7 +649,7 @@ def create_item_from_url_logic(db: Session, data: dict, image_url: str, database
             itCreatedAt=now,
             itModifiedBy="AI_BOT",
             itModifiedAt=now,
-            Bot=f"Importado desde URL. IA: {data.get('usage', 'N/A')}"
+            Bot="Importado desde URL"
         )
         db.add(new_item)
         db.commit()
@@ -680,8 +680,7 @@ def create_item_from_url_logic(db: Session, data: dict, image_url: str, database
             lnCreatedBy="AI_BOT",
             lnCreatedAt=now,
             lnModifiedBy="AI_BOT",
-            lnModifiedAt=now,
-            Bot=f"Variante auto-generada desde URL. IA: {data.get('usage', 'N/A')}"
+            lnModifiedAt=now
         )
         db.add(new_ln)
         db.commit()
