@@ -181,7 +181,7 @@ def find_project_id(address_text: str, project_choices: dict):
         return project_choices[matches[0]]
     return None
 
-def insert_document_logic(db: Session, data: dict, source_file_id: str, appsheet_doc_id: str = None, database_id: str = None, drive_id: str = None):
+def insert_document_logic(db: Session, data: dict, source_file_id: str, appsheet_doc_id: str = None, database_id: str = None):
     """PASO 1: Digitalización y Registro de Filas.
     Guarda el documento y las líneas. No afecta inventario.
     """
@@ -249,9 +249,12 @@ def insert_document_logic(db: Session, data: dict, source_file_id: str, appsheet
     doc_obj.doTaxes = header.get("TaxAmount", 0.0)
     doc_obj.doTotal = header.get("TotalAmount", 0.0)
     doc_obj.doFile = source_file_id
-    doc_obj.DriveID = drive_id or source_file_id
+    doc_obj.DriveID = source_file_id
     # Se eliminó el estado manual DRAFT a petición del usuario
-    doc_obj.doAIComment = f"Digitalizado. Proyecto: {matched_project_id or 'N/A'}. IA: {data.get('usage', 'N/A')}"
+    
+    num_lines = len(lines)
+    issuer_name = issuer_data.get('cpName', 'Desconocido')
+    doc_obj.doAIComment = f"Factura digitalizada exitosamente. Emisor: {issuer_name}. Total de líneas: {num_lines}."
 
     # Se evita llamar a .delete() si no hay líneas para prevenir error de permisos (DELETE command denied)
     if db.query(FnDocumentLn).filter(FnDocumentLn.DocumentID == doc_obj.DocumentID).count() > 0:
