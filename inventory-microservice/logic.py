@@ -257,7 +257,8 @@ def insert_document_logic(db: Session, data: dict, source_file_id: str, appsheet
     # Se eliminó el estado manual DRAFT a petición del usuario
     num_lines = len(lines)
     issuer_name = issuer_data.get('cpName', 'Desconocido')
-    doc_obj.doAIComment = f"Digitalización completa. Emisor: {issuer_name}. Líneas procesadas: {num_lines}. Proyecto: {matched_project_id or 'N/A'}."
+    project_info = f". Proyecto: {matched_project_id}" if matched_project_id else ""
+    doc_obj.doAIComment = f"Digitalización completa. Emisor: {issuer_name}. Líneas procesadas: {num_lines}{project_info}."
 
     # Se evita llamar a .delete() si no hay líneas para prevenir error de permisos (DELETE command denied)
     if db.query(FnDocumentLn).filter(FnDocumentLn.DocumentID == doc_obj.DocumentID).count() > 0:
