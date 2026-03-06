@@ -84,17 +84,40 @@ def _load_product_catalog(db: Session, database_id: str):
             
     return sku_map, choices_map, parent_map, variant_map
 
-def find_product_id(description: str, choices_map: dict):
-    """Busca el ItemLnID usando match EXACTO de nombre para evitar falsos positivos."""
-    if not description or not choices_map:
+def find_product_id(description: str, choices_map: dict, product_hint: str = "", brand_hint: str = "", model_hint: str = ""):
+    """Busca el ItemLnID usando match EXACTO y luego FUZZY para encontrar el producto correcto."""
+    if not choices_map:
         return "UNKNOWN", "Raw Name"
     
     clean_desc = str(description).strip().lower()
     
     # 1. Búsqueda por match exacto (case-insensitive)
     for title, ln_id in choices_map.items():
-        if str(title).strip().lower() == clean_desc:
+        if title and str(title).strip().lower() == clean_desc:
             return ln_id, f"Exact Name ({title[:20]})"
+            
+    # 2. Búsqueda combinada usando hints de IA (Marca + Modelo/Producto)
+    hints_combined = f"{brand_hint} {product_hint} {model_hint}".strip().lower()
+    if hints_combined:
+        for title, ln_id in choices_map.items():
+            if title and str(title).strip().lower() == hints_combined:
+                return ln_id, f"Exact Hint ({title[:20]})"
+                
+    # 3. Búsqueda difusa (Fuzzy Match) usando descripción o hints
+    import difflib
+    keys = list(choices_map.keys())
+    
+    # Intentar con la descripción original
+    if clean_desc:
+        matches = difflib.get_close_matches(clean_desc, keys, n=1, cutoff=0.75)
+        if matches:
+            return choices_map[matches[0]], f"Fuzzy Desc ({matches[0][:20]})"
+            
+    # Intentar con los hints combinados
+    if hints_combined:
+        matches = difflib.get_close_matches(hints_combined, keys, n=1, cutoff=0.75)
+        if matches:
+            return choices_map[matches[0]], f"Fuzzy Hint ({matches[0][:20]})"
     
     return "UNKNOWN", "Raw Name"
 
@@ -189,7 +212,7 @@ def insert_document_logic(db: Session, data: dict, source_file_id: str, appsheet
     doc_obj.doFile = source_file_id
     doc_obj.DriveID = drive_id or source_file_id
     # Se eliminó el estado manual DRAFT a petición del usuario
-    doc_obj.Bot = f"Digitalizado. Proyecto: {matched_project_id or 'N/A'}. IA: {data.get('usage', 'N/A')}"
+    doc_obj.doAIComment = f"Digitalizado. Proyecto: {matched_project_id or 'N/A'}. IA: {data.get('usage', 'N/A')}"
 
     # Se evita llamar a .delete() si no hay líneas para prevenir error de permisos (DELETE command denied)
     if db.query(FnDocumentLn).filter(FnDocumentLn.DocumentID == doc_obj.DocumentID).count() > 0:
@@ -201,9 +224,11 @@ def insert_document_logic(db: Session, data: dict, source_file_id: str, appsheet
     for line in lines:
         manual_desc = str(line.get("description") or "Sin descripción").strip()
         product_hint = str(line.get("product_name") or "").strip()
+        brand_hint = str(line.get("brand") or "").strip()
+        model_hint = str(line.get("model") or "").strip()
         
         # Match EXACTO inicial para sugerencia
-        supply_id, _ = find_product_id(manual_desc, choices_map)
+        supply_id, _ = find_product_id(manual_desc, choices_map, product_hint, brand_hint, model_hint)
         
         qty = float(line.get("quantity", 0))
         price_unit = float(line.get("unit_price", 0))

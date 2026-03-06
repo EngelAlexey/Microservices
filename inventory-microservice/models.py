@@ -92,7 +92,8 @@ class FnDocument(Base):
     doCreatedBy = Column(String(150), default="AI_BOT")
     doCreatedAt = Column(DateTime, default=datetime.datetime.now)
     DriveID = Column(String(2000))      
-    Bot = Column(Text, nullable=True)   
+    Bot = Column(Text, nullable=True)
+    doAIComment = Column(Text, nullable=True)   
 
 class FnDocumentLn(Base):
     __tablename__ = "fnDocumentsLns"
