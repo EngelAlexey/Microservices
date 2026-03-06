@@ -1,10 +1,14 @@
-from google import genai
-from google.genai import types
 import os
 import json
 from dotenv import load_dotenv
 
 load_dotenv()
+
+if "GOOGLE_API_KEY" in os.environ:
+    os.environ.pop("GOOGLE_API_KEY")
+
+from google import genai
+from google.genai import types
 
 _client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 

@@ -191,7 +191,11 @@ def insert_document_logic(db: Session, data: dict, source_file_id: str, appsheet
     # Se eliminó el estado manual DRAFT a petición del usuario
     doc_obj.Bot = f"Digitalizado. Proyecto: {matched_project_id or 'N/A'}. IA: {data.get('usage', 'N/A')}"
 
-    db.query(FnDocumentLn).filter(FnDocumentLn.DocumentID == doc_obj.DocumentID).delete()
+    # Se evita llamar a .delete() si no hay líneas para prevenir error de permisos (DELETE command denied)
+    if db.query(FnDocumentLn).filter(FnDocumentLn.DocumentID == doc_obj.DocumentID).count() > 0:
+        import logging
+        logging.getLogger(__name__).warning(f"Document {doc_obj.DocumentID} already has lines. Cannot delete due to DB permissions.")
+        # db.query(FnDocumentLn).filter(FnDocumentLn.DocumentID == doc_obj.DocumentID).delete()
 
     line_number = 1
     for line in lines:
@@ -634,13 +638,14 @@ def create_item_from_url_logic(db: Session, data: dict, image_url: str, database
             ItemID=item_id,
             DatabaseID=database_id,
             itTitle=it_title,
-            itDescription=it_description or None,
+            itDescription=it_description or "",
             itBrand=brand_id,
-            itCategory=it_category or None,
-            itSubcategory=it_subcategory or None,
-            itModel=it_model or None,
-            itWebsite=str(data.get("itWebsite"))[:500] if data.get("itWebsite") else None,
-            itObservations=it_observations or None,
+            itCategory=it_category or "",
+            itSubcategory=it_subcategory or "",
+            itModel=it_model or "",
+            itWebsite=str(data.get("itWebsite"))[:500] if data.get("itWebsite") else "",
+            itObservations=it_observations or "",
+            CabysID="",
             itStatus=True,
             # itImage: URL directa como placeholder inmediato; el hilo de background
             # la reemplaza con el nombre del archivo Drive cuando termina la subida.
@@ -673,9 +678,16 @@ def create_item_from_url_logic(db: Session, data: dict, image_url: str, database
             DatabaseID=database_id,
             lnCode=ln_id,
             lnTitle=ln_title[:150],
-            lnSize=it_model[:100] if it_model else None,
+            lnSize=it_model[:100] if it_model else "",
+            lnBarcode="",
+            lnSpecs="",
+            UnitID="UND",
+            inCertification="",
+            lnWeight="",
             lnQuantity=0,
             lnAvailable=0,
+            lnFeatures="",
+            lnObservations="",
             lnStatus=True,
             lnCreatedBy="AI_BOT",
             lnCreatedAt=now,
