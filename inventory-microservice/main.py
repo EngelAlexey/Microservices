@@ -77,8 +77,8 @@ async def process_drive_file(payload: FilePayload, db: Session = Depends(get_db)
             db_check.close()
 
     # Si sigue siendo una ruta de AppSheet, resolverla
+    loop = asyncio.get_event_loop()
     if '/' in file_id:
-        loop = asyncio.get_event_loop()
         file_id = await loop.run_in_executor(_executor, resolve_file_id, file_id)
         logger.info(f"Drive ID resuelto desde ruta: {file_id}")
 
