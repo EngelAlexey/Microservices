@@ -103,7 +103,46 @@ def find_product_id(description: str, choices_map: dict, product_hint: str = "",
             if title and str(title).strip().lower() == hints_combined:
                 return ln_id, f"Exact Hint ({title[:20]})"
                 
-    # 3. Búsqueda difusa (Fuzzy Match) usando descripción o hints
+    # 3. Búsqueda por subcadena o coincidencia de palabras (Word Overlap)
+    import re
+    
+    def get_word_overlap(s1, s2):
+        w1 = set(re.findall(r'\w+', s1))
+        w2 = set(re.findall(r'\w+', s2))
+        if not w1 or not w2: return 0.0
+        return sum(1 for w in w1 if w in w2) / len(w1)
+        
+    best_overlap = 0.0
+    best_overlap_id = None
+    best_overlap_title = None
+
+    for title, ln_id in choices_map.items():
+        if not title: continue
+        title_lower = str(title).strip().lower()
+        
+        # Substring directo (si uno contiene enteramente al otro y tienen buen tamaño)
+        if (clean_desc in title_lower or title_lower in clean_desc) and len(clean_desc) > 8:
+            return ln_id, f"Substring ({title[:20]})"
+            
+        overlap = get_word_overlap(clean_desc, title_lower)
+        if overlap > best_overlap:
+            best_overlap = overlap
+            best_overlap_id = ln_id
+            best_overlap_title = title
+            
+        # Revisar también con los hints combinados
+        if hints_combined:
+            overlap_hint = get_word_overlap(hints_combined, title_lower)
+            if overlap_hint > best_overlap:
+                best_overlap = overlap_hint
+                best_overlap_id = ln_id
+                best_overlap_title = title
+
+    # Si empalma al menos el 75% de las palabras, lo aceptamos
+    if best_overlap >= 0.75 and best_overlap_id:
+        return best_overlap_id, f"Word Overlap ({best_overlap_title[:20]})"
+
+    # 4. Búsqueda difusa (Fuzzy Match posicional con difflib) como último recurso
     import difflib
     keys = list(choices_map.keys())
     
