@@ -64,11 +64,23 @@ async def process_drive_file(payload: FilePayload, db: Session = Depends(get_db)
     db_id = payload.database_id
     logger.info(f"Digitalizando Factura: {file_id} (Client: {db_id})")
 
-    # Resolver ruta de AppSheet a Drive ID real si es necesario
+    # PRIORIDAD: Si el DocumentID existe y ya tiene DriveID, usarlo (caso Gmail/Bot)
     original_path = file_id
-    loop = asyncio.get_event_loop()
-    file_id = await loop.run_in_executor(_executor, resolve_file_id, file_id)
-    logger.info(f"Drive ID resuelto: {file_id}")
+    if payload.doc_id:
+        db_check = SessionLocal()
+        try:
+            doc_record = db_check.query(FnDocument).filter(FnDocument.DocumentID == payload.doc_id).first()
+            if doc_record and doc_record.DriveID:
+                file_id = doc_record.DriveID.strip()
+                logger.info(f"Usando DriveID pre-existente desde DB: {file_id}")
+        finally:
+            db_check.close()
+
+    # Si sigue siendo una ruta de AppSheet, resolverla
+    if '/' in file_id:
+        loop = asyncio.get_event_loop()
+        file_id = await loop.run_in_executor(_executor, resolve_file_id, file_id)
+        logger.info(f"Drive ID resuelto desde ruta: {file_id}")
 
     # Verificar duplicado
     exists = await loop.run_in_executor(_executor, _check_duplicate, file_id, db_id)
