@@ -76,7 +76,7 @@ def resolve_file_id(file_id_or_path: str) -> str:
         
         files = results.get('files', [])
         if files:
-            real_id = files[0]['id']
+            real_id = str(files[0]['id']).strip()
             logger.info(f"Archivo encontrado en Drive: {real_id} ({filename})")
             return real_id
         else:

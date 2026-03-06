@@ -247,14 +247,14 @@ def insert_document_logic(db: Session, data: dict, source_file_id: str, appsheet
     doc_obj.CurrencyID = header.get("CurrencyID", "CRC")
     doc_obj.doSubtotal = header.get("SubtotalAmount", 0.0)
     doc_obj.doTaxes = header.get("TaxAmount", 0.0)
-    doc_obj.doTotal = header.get("TotalAmount", 0.0)
-    doc_obj.doFile = source_file_id
-    doc_obj.DriveID = source_file_id
+    clean_file_id = str(source_file_id).strip()
+    doc_obj.doFile = clean_file_id
+    doc_obj.DriveID = clean_file_id
     # Se eliminó el estado manual DRAFT a petición del usuario
     
     num_lines = len(lines)
     issuer_name = issuer_data.get('cpName', 'Desconocido')
-    doc_obj.doAIComment = f"Factura digitalizada exitosamente. Emisor: {issuer_name}. Total de líneas: {num_lines}."
+    doc_obj.doAIComment = f"Digitalización completa. Emisor: {issuer_name}. Líneas procesadas: {num_lines}. Proyecto: {matched_project_id or 'N/A'}."
 
     # Se evita llamar a .delete() si no hay líneas para prevenir error de permisos (DELETE command denied)
     if db.query(FnDocumentLn).filter(FnDocumentLn.DocumentID == doc_obj.DocumentID).count() > 0:
