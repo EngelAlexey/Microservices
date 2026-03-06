@@ -119,7 +119,7 @@ def find_project_id(address_text: str, project_choices: dict):
         return project_choices[matches[0]]
     return None
 
-def insert_document_logic(db: Session, data: dict, source_file_id: str, appsheet_doc_id: str = None, database_id: str = None):
+def insert_document_logic(db: Session, data: dict, source_file_id: str, appsheet_doc_id: str = None, database_id: str = None, drive_id: str = None):
     """PASO 1: Digitalización y Registro de Filas.
     Guarda el documento y las líneas. No afecta inventario.
     """
@@ -187,7 +187,7 @@ def insert_document_logic(db: Session, data: dict, source_file_id: str, appsheet
     doc_obj.doTaxes = header.get("TaxAmount", 0.0)
     doc_obj.doTotal = header.get("TotalAmount", 0.0)
     doc_obj.doFile = source_file_id
-    doc_obj.DriveID = source_file_id
+    doc_obj.DriveID = drive_id or source_file_id
     # Se eliminó el estado manual DRAFT a petición del usuario
     doc_obj.Bot = f"Digitalizado. Proyecto: {matched_project_id or 'N/A'}. IA: {data.get('usage', 'N/A')}"
 
@@ -214,6 +214,14 @@ def insert_document_logic(db: Session, data: dict, source_file_id: str, appsheet
         
         ln_uuid = str(uuid.uuid4()).replace('-', '')[:8].upper()
         
+        obs_parts = []
+        if supply_id == "UNKNOWN":
+            obs_parts.append("⚠️ Artículo no existe en catálogo, debe registrarse.")
+        
+        hint_str = f"HINT:{product_hint}|BRAND:{line.get('brand') or ''}|MODEL:{line.get('model') or ''}"
+        if product_hint or line.get('brand') or line.get('model'):
+            obs_parts.append(hint_str)
+            
         new_ln = FnDocumentLn(
             DocumentLnID=ln_uuid,
             DocumentID=doc_obj.DocumentID,
@@ -228,9 +236,7 @@ def insert_document_logic(db: Session, data: dict, source_file_id: str, appsheet
             dlSubtotal=subtotal_ln,
             dlTaxes=tax_ln,
             dlTotal=total_ln,
-            # Guardamos el nombre "Maestro" sugerido por la IA para usarlo en el Paso 2
-            # Guardamos también la marca y el modelo sugeridos por la IA
-            dlObservations=f"HINT:{product_hint}|BRAND:{line.get('brand') or ''}|MODEL:{line.get('model') or ''}" if product_hint or line.get('brand') or line.get('model') else None
+            dlObservations=" ".join(obs_parts) if obs_parts else None
         )
         db.add(new_ln)
         line_number += 1
@@ -260,109 +266,11 @@ def create_inventory_movements_logic(db: Session, document_id: str, database_id:
         if not final_supply_id:
             final_supply_id, _ = find_product_id(ln.dlDescription, choices_map)
             
-        # Si sigue siendo desconocido, aplicamos Lógica de Jerarquía
+        # Si sigue siendo desconocido, evitamos crearlo automáticamente
         if final_supply_id == "UNKNOWN" or not final_supply_id:
-            product_hint = ""
-            brand_hint = ""
-            model_hint = ""
-            if ln.dlObservations:
-                if "HINT:" in ln.dlObservations:
-                    product_hint = ln.dlObservations.split("HINT:")[1].split("|")[0].strip()
-                if "BRAND:" in ln.dlObservations:
-                    brand_hint = ln.dlObservations.split("BRAND:")[1].split("|")[0].strip()
-                if "MODEL:" in ln.dlObservations:
-                    model_hint = ln.dlObservations.split("MODEL:")[1].split("|")[0].strip()
+            logger.warning(f"Línea ignorada por artículo faltante (no se auto-creará): {ln.dlDescription}")
+            continue # Saltamos la creación de inventario para esta línea
 
-            # 1. Buscar o Crear Marca
-            brand_id = None
-            if brand_hint:
-                brand_id = upsert_brand_logic(db, brand_hint, database_id)
-
-            # 2. Buscar Maestro (BcItem)
-            # Intentamos match exacto del hint contra itTitle
-            existing_master_id = None
-            if product_hint:
-                master = db.query(BcItem).filter(BcItem.itTitle == product_hint, BcItem.DatabaseID == database_id).first()
-                if master:
-                    existing_master_id = master.ItemID
-            
-            # Si no hay hint o no hubo match, intentamos buscar si el nombre del padre está contenido en la descripción
-            if not existing_master_id:
-                # Verificamos si algún itTitle existente es prefijo de la descripción de la línea.
-                # IMPORTANTE: solo reutilizamos el maestro si su nombre es suficientemente específico
-                # (>5 chars) Y comparte la misma marca, para evitar que un maestro genérico como
-                # "Bourbon" sea reutilizado entre marcas distintas (Yellowstone, Ezra Brooks, etc.)
-                all_masters = db.query(BcItem).filter(BcItem.DatabaseID == database_id).all()
-                for m in all_masters:
-                    master_title = (m.itTitle or "").strip().lower()
-                    desc_lower = ln.dlDescription.strip().lower()
-                    title_is_specific = len(master_title) > 5
-                    same_brand = (m.itBrand == brand_id) if brand_id else (m.itBrand is None)
-                    if title_is_specific and same_brand and master_title in desc_lower:
-                        existing_master_id = m.ItemID
-                        break
-
-            # 2. Crear o Reutilizar Maestro
-            if existing_master_id:
-                item_id = existing_master_id
-                logger.info(f"Reutilizando Maestro Identificado: {item_id} para {ln.dlDescription}")
-            else:
-                now = get_now_ca()
-                item_id = str(uuid.uuid4()).replace('-', '')[:8].upper()
-                new_bc_item = BcItem(
-                    ItemID=item_id,
-                    DatabaseID=database_id,
-                    itTitle=product_hint if product_hint else ln.dlDescription[:300],
-                    itBrand=brand_id,
-                    itModel=model_hint[:45] if model_hint else None,
-                    itStatus=True,
-                    itCreatedBy="AI_BOT",
-                    itCreatedAt=now,
-                    itModifiedBy="AI_BOT",
-                    itModifiedAt=now
-                )
-                db.add(new_bc_item)
-                logger.info(f"Nuevo Maestro Creado: {item_id} ({product_hint or ln.dlDescription[:30]})")
-                
-                # Disparar descarga de imagen en background.
-                # La búsqueda usa marca + nombre del producto para ser específica
-                # (ej: "Yellowstone Bourbon" en vez de solo "Bourbon")
-                if image_folder_id:
-                    base_query = product_hint or ln.dlDescription[:60]
-                    img_query = f"{brand_hint} {base_query}".strip() if brand_hint else base_query
-                    img_filename = f"{item_id}.jpg"
-                    t = threading.Thread(
-                        target=fetch_and_upload_image_task,
-                        args=(img_query, img_filename, image_folder_id, item_id),
-                        daemon=True
-                    )
-                    t.start()
-
-            # 3. Crear Variante (BcItemLn)
-            now = get_now_ca()
-            final_supply_id = str(uuid.uuid4()).replace('-', '')[:8].upper()
-            
-            # El título de la variante debería incluir la presentación (700ml, etc) si existe
-            ln_variant_title = ln.dlDescription[:150]
-            if model_hint and model_hint.lower() not in ln_variant_title.lower():
-                ln_variant_title = f"{ln_variant_title} {model_hint}"[:150]
-
-            new_bc_item_ln = BcItemLn(
-                ItemLnID=final_supply_id,
-                ItemID=item_id,
-                DatabaseID=database_id,
-                lnCode=final_supply_id,  # Unique code per variant to avoid duplicate key constraint
-                lnTitle=ln_variant_title,
-                lnSize=model_hint[:100] if model_hint else None,
-                lnQuantity=0, 
-                lnAvailable=0,
-                lnCreatedBy="AI_BOT",
-                lnCreatedAt=now,
-                lnModifiedBy="AI_BOT",
-                lnModifiedAt=now
-            )
-            db.add(new_bc_item_ln)
-            ln.SupplyID = final_supply_id
             
         # 4. Generar Movimientos y Precios
         now = get_now_ca()
