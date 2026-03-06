@@ -181,7 +181,7 @@ def find_project_id(address_text: str, project_choices: dict):
         return project_choices[matches[0]]
     return None
 
-def insert_document_logic(db: Session, data: dict, source_file_id: str, appsheet_doc_id: str = None, database_id: str = None):
+def insert_document_logic(db: Session, data: dict, source_file_id: str, appsheet_doc_id: str = None, database_id: str = None, drive_id: str = None):
     """PASO 1: Digitalización y Registro de Filas.
     Guarda el documento y las líneas. No afecta inventario.
     """
@@ -247,11 +247,14 @@ def insert_document_logic(db: Session, data: dict, source_file_id: str, appsheet
     doc_obj.CurrencyID = header.get("CurrencyID", "CRC")
     doc_obj.doSubtotal = header.get("SubtotalAmount", 0.0)
     doc_obj.doTaxes = header.get("TaxAmount", 0.0)
-    clean_file_id = str(source_file_id).strip()
-    doc_obj.doFile = clean_file_id
-    doc_obj.DriveID = clean_file_id
-    # Se eliminó el estado manual DRAFT a petición del usuario
+    doc_obj.doTotal = header.get("TotalAmount", 0.0)
     
+    # IMPORTANTE: doFile mantiene la ruta de AppSheet (/Documents/...) para el PDF Preview
+    doc_obj.doFile = source_file_id
+    # DriveID tiene el identificador puro de Google Drive para el Thumbnail
+    doc_obj.DriveID = str(drive_id or source_file_id).strip()
+    
+    # Se eliminó el estado manual DRAFT a petición del usuario
     num_lines = len(lines)
     issuer_name = issuer_data.get('cpName', 'Desconocido')
     doc_obj.doAIComment = f"Digitalización completa. Emisor: {issuer_name}. Líneas procesadas: {num_lines}. Proyecto: {matched_project_id or 'N/A'}."

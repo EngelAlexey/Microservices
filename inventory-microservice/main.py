@@ -65,6 +65,7 @@ async def process_drive_file(payload: FilePayload, db: Session = Depends(get_db)
     logger.info(f"Digitalizando Factura: {file_id} (Client: {db_id})")
 
     # Resolver ruta de AppSheet a Drive ID real si es necesario
+    original_path = file_id
     loop = asyncio.get_event_loop()
     file_id = await loop.run_in_executor(_executor, resolve_file_id, file_id)
     logger.info(f"Drive ID resuelto: {file_id}")
@@ -84,8 +85,8 @@ async def process_drive_file(payload: FilePayload, db: Session = Depends(get_db)
 
     try:
         result = insert_document_logic(
-            db, data, source_file_id=file_id, appsheet_doc_id=payload.doc_id, 
-            database_id=payload.database_id
+            db, data, source_file_id=original_path, appsheet_doc_id=payload.doc_id, 
+            database_id=payload.database_id, drive_id=file_id
         )
         return {"status": "success", "data": result}
     except Exception as e:
