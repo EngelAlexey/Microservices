@@ -22,20 +22,22 @@ _executor = ThreadPoolExecutor(max_workers=4)
 class FilePayload(BaseModel):
     file_id: str
     database_id: str
-    doc_id: str = None
-    image_folder_id: str = None
+    doc_id: str | None = None
+    image_folder_id: str | None = None
 
 class MovementPayload(BaseModel):
-    document_id: str
-    database_id: str
-    image_folder_id: str = None
-    project_id: str = None
+    document_id: str | None = None
+    database_id: str | None = None
+    DocumentID: str | None = None
+    DatabaseID: str | None = None
+    image_folder_id: str | None = None
+    project_id: str | None = None
 
 class UrlPayload(BaseModel):
     url: str
     database_id: str
-    image_folder_id: str = None
-    item_id: str = None
+    image_folder_id: str | None = None
+    item_id: str | None = None
 
 @app.get("/")
 def read_root():
@@ -90,8 +92,14 @@ async def process_drive_file(payload: FilePayload, db: Session = Depends(get_db)
 async def create_movements(payload: MovementPayload, db: Session = Depends(get_db)):
     try:
         img_folder = payload.image_folder_id or os.environ.get("DEFAULT_IMAGE_FOLDER_ID")
+        doc_id = payload.document_id or payload.DocumentID
+        db_id = payload.database_id or payload.DatabaseID
+        
+        if not doc_id or not db_id:
+            raise HTTPException(status_code=422, detail="Missing DocumentID or DatabaseID in payload")
+            
         result = create_inventory_movements_logic(
-            db, payload.document_id, payload.database_id, 
+            db, doc_id, db_id, 
             image_folder_id=img_folder, project_id=payload.project_id
         )
         return {"status": "success", "result": result}
