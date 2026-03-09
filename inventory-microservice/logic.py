@@ -283,8 +283,14 @@ def create_inventory_movements_logic(db: Session, document_id: str, database_id:
         else:
             action = base_action
             mv_id = str(uuid.uuid4()).replace('-', '')[:8].upper()
-            origin = (ln.OriginID or doc.IssuerID or "")[:10] or None
-            dest = (ln.DestinationID or project_id or "")[:10] or None
+            
+            if action == "OUT":
+                origin = (ln.OriginID or doc.IssuerID or "")[:10] or None
+                dest = (ln.DestinationID or project_id or "")[:10] or None
+            else:
+                origin = (ln.DestinationID or doc.IssuerID or "")[:10] or None
+                dest = (ln.OriginID or project_id or "")[:10] or None
+                
             _make_movement(db, mv_id=mv_id, database_id=database_id, item_id=final_supply_id, doc_ln_id=ln.DocumentLnID,
                            mv_date=doc.doDate, action=action, quantity=qty, origin_id=origin, project_id=dest,
                            notes=notes_base, now=now)
