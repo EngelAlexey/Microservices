@@ -16,7 +16,6 @@ DATABASE_URL = f"mysql+pymysql://{DB_USER}:{DB_PASS}@{DB_HOST}:{DB_PORT}/{DB_NAM
 
 import ssl
 
-# Check for certificate in Render secrets first, then local
 ssl_cert_path = "/etc/secrets/server-ca.pem"
 if not os.path.exists(ssl_cert_path):
     ssl_cert_path = os.path.join(os.path.dirname(__file__), "certs", "server-ca.pem")
@@ -27,7 +26,6 @@ if os.path.exists(ssl_cert_path):
     ssl_context.verify_mode = ssl.CERT_NONE
 else:
     ssl_context = None
-    print(f"WARNING: SSL certificate not found at {ssl_cert_path}")
 
 engine = create_engine(
     DATABASE_URL,

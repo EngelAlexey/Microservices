@@ -38,16 +38,16 @@ Return JSON:
         "TaxAmount": 0.0,
         "TotalAmount": 0.0,
         "issuer": {
-            "cpName": "string or null - Official Legal Name (Razón Social)",
-            "cpTitle": "string or null - Trade / Fantasy Name (Nombre Comercial/Fantasía)",
+            "cpName": "string or null",
+            "cpTitle": "string or null",
             "cpIdentification": "string or null",
             "cpAddress": "string or null",
             "cpPhone": "string or null",
             "cpEmail": "string or null"
         },
         "receptor": {
-            "cpName": "string or null - Official Legal Name (Razón Social)",
-            "cpTitle": "string or null - Trade / Fantasy Name (Nombre Comercial/Fantasía)",
+            "cpName": "string or null",
+            "cpTitle": "string or null",
             "cpIdentification": "string or null",
             "cpAddress": "string or null",
             "cpPhone": "string or null",
@@ -59,9 +59,9 @@ Return JSON:
             "sku_candidate": "string",
             "cabys_candidate": "string",
             "description": "string",
-            "product_name": "string (Generic)",
-            "brand": "string (Extract brand name if present)",
-            "model": "string (Variant/Presentation like 700ml, 1L, etc.)",
+            "product_name": "string",
+            "brand": "string",
+            "model": "string",
             "quantity": 0.0, 
             "unit_price": 0.0,
             "discount_amount": 0.0,
@@ -83,28 +83,19 @@ def extract_invoice_data(pdf_content_bytes):
             config=types.GenerateContentConfig(
                 response_mime_type="application/json",
                 temperature=0.1,
-                thinking_config=types.ThinkingConfig(
-                    thinking_budget=0 
-                ),
+                thinking_config=types.ThinkingConfig(thinking_budget=0),
             )
         )
-        
         text = response.text.replace('```json', '').replace('```', '')
         data = json.loads(text)
-        
         usage = response.usage_metadata
-        print(f"DEBUG: Usage Metadata from Gemini: {usage}")
-        
         data['usage'] = {
             'prompt_tokens': usage.prompt_token_count,
             'candidates_tokens': usage.candidates_token_count,
             'total_tokens': usage.total_token_count
         }
-        print(f"DEBUG: Data with usage: {data['usage']}")
-        
         return data
-    except Exception as e:
-        print(f"Error parsing Gemini JSON: {e}")
+    except:
         return None
 
 _COMPANY_PROMPT = """Extract the underlying company data from this document, specifically looking for the issuer or client details.
@@ -118,12 +109,12 @@ Rules for names:
 
 Return JSON format:
 {
-    "cpName": "string or null - Official legal name (e.g. 'Grupo Istmo de Papagayo S.R.L.')",
-    "cpTitle": "string or null - Commercial name (e.g. 'Hotel Four Seasons')",
-    "cpIdentification": "string or null - Tax ID / VAT number",
-    "cpAddress": "string or null - Full address",
-    "cpEmail": "string or null - Primary contact email",
-    "cpPhone": "string or null - Primary contact phone number"
+    "cpName": "string or null",
+    "cpTitle": "string or null",
+    "cpIdentification": "string or null",
+    "cpAddress": "string or null",
+    "cpEmail": "string or null",
+    "cpPhone": "string or null"
 }"""
 
 def extract_company_data(pdf_content_bytes):
@@ -137,25 +128,19 @@ def extract_company_data(pdf_content_bytes):
             config=types.GenerateContentConfig(
                 response_mime_type="application/json",
                 temperature=0.1,
-                thinking_config=types.ThinkingConfig(
-                    thinking_budget=0 
-                ),
+                thinking_config=types.ThinkingConfig(thinking_budget=0),
             )
         )
-        
         text = response.text.replace('```json', '').replace('```', '')
         data = json.loads(text)
-        
         usage = response.usage_metadata
         data['usage'] = {
             'prompt_tokens': usage.prompt_token_count,
             'candidates_tokens': usage.candidates_token_count,
             'total_tokens': usage.total_token_count
         }
-        
         return data
-    except Exception as e:
-        print(f"Error parsing Gemini JSON for company data: {e}")
+    except:
         return None
 
 _PRODUCT_URL_PROMPT = """You are a product catalog extraction assistant.
@@ -172,37 +157,29 @@ Rules:
 
 Return JSON format:
 {
-    "itTitle": "Generic product name (without brand or size)",
-    "itDescription": "Full product description",
-    "itBrand": "Brand name",
-    "itCategory": "Broad category",
-    "itSubcategory": "Specific subcategory",
-    "itModel": "Variant or presentation (e.g. 700ml, Wild Berry)",
-    "itObservations": "Additional notes, tasting notes, aromas, etc."
+    "itTitle": "string",
+    "itDescription": "string",
+    "itBrand": "string",
+    "itCategory": "string",
+    "itSubcategory": "string",
+    "itModel": "string",
+    "itObservations": "string"
 }"""
 
 def extract_product_from_html(html_text: str):
-    """Uses Gemini to extract structured product data from scraped HTML."""
     try:
-        # Trim HTML to avoid exceeding token limits
-        # We keep first 50k chars which usually covers the product detail section
         trimmed_html = html_text[:50000]
-        
         response = _client.models.generate_content(
             model='gemini-2.5-flash',
             contents=[trimmed_html, _PRODUCT_URL_PROMPT],
             config=types.GenerateContentConfig(
                 response_mime_type="application/json",
                 temperature=0.1,
-                thinking_config=types.ThinkingConfig(
-                    thinking_budget=0
-                ),
+                thinking_config=types.ThinkingConfig(thinking_budget=0),
             )
         )
-        
         text = response.text.replace('```json', '').replace('```', '')
         data = json.loads(text)
-        
         usage = response.usage_metadata
         data['usage'] = {
             'prompt_tokens': usage.prompt_token_count,
@@ -210,6 +187,5 @@ def extract_product_from_html(html_text: str):
             'total_tokens': usage.total_token_count
         }
         return data
-    except Exception as e:
-        print(f"Error parsing Gemini JSON for product URL data: {e}")
+    except:
         return None

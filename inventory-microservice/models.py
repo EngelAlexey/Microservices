@@ -69,7 +69,6 @@ class BcItemLn(Base):
 
 class FnDocument(Base):
     __tablename__ = "fnDocuments"
-    
     DocumentID = Column(String(150), primary_key=True)
     DatabaseID = Column(String(2000), nullable=True)
     doFile = Column(String(256))        
@@ -78,17 +77,14 @@ class FnDocument(Base):
     doAccount = Column(String(64), nullable=True)
     doTitle = Column(Text, nullable=True)
     doConsecutive = Column(String(2000))
-    
     IssuerID = Column(String(10), nullable=True)
     ReceptorID = Column(String(10), nullable=True)
-    
     CurrencyID = Column(String(64), default="CRC")
     doSubtotal = Column(DECIMAL(13, 2))
     doTaxes = Column(DECIMAL(13, 2))
     doTotal = Column(DECIMAL(13, 2))
-    
     doStatus = Column(String(64), default="NEW")
-    doCredit = Column(String(64), nullable=True) # Cash, 15 days, 30 days
+    doCredit = Column(String(64), nullable=True) 
     doCreatedBy = Column(String(150), default="AI_BOT")
     doCreatedAt = Column(DateTime, default=datetime.datetime.now)
     DriveID = Column(String(2000))      
@@ -97,16 +93,13 @@ class FnDocument(Base):
 
 class FnDocumentLn(Base):
     __tablename__ = "fnDocumentsLns"
-    
     DocumentLnID = Column(String(60), primary_key=True)
     DatabaseID = Column(String(10), nullable=True)
     DocumentID = Column(String(150))     
     dlNumber = Column(Integer, nullable=True)
-    
     SupplyID = Column(Text)             
     CabysID = Column(String(50))
     dlDescription = Column(String(2000))
-    
     dlQuantity = Column(DECIMAL(13, 2))
     dlUnit = Column(String(64), default="Unid")
     dlUnitPrice = Column(DECIMAL(13, 2))
@@ -114,33 +107,30 @@ class FnDocumentLn(Base):
     dlSubtotal = Column(DECIMAL(13, 2))
     dlTaxes = Column(DECIMAL(13, 2), default=0)
     dlTotal = Column(DECIMAL(13, 2))
-    
     dlObservations = Column(String(2000), nullable=True)
-    OriginID      = Column(String(10), nullable=True)   # Source warehouse / ProjectID (OUT / Transfer)
-    DestinationID = Column(String(10), nullable=True)   # Destination warehouse / ProjectID (IN / Transfer)
+    OriginID      = Column(String(10), nullable=True)   
+    DestinationID = Column(String(10), nullable=True)   
     dlBot         = Column(Text, nullable=True)
 
 class IcMovement(Base):
     __tablename__ = "icMovements"
-    
     MovementID = Column(String(10), primary_key=True)
     isDeleted = Column(Boolean, default=False)
     DatabaseID = Column(String(10))
-    OriginID = Column(String(10), nullable=True) # Made nullable based on creation logic
+    OriginID = Column(String(10), nullable=True) 
     ProjectID = Column(String(10), nullable=True)
-    ItemID = Column(String(10), nullable=True) # Made nullable based on creation logic
+    ItemID = Column(String(10), nullable=True) 
     DocumentLnID = Column(String(150))
     mvDate = Column(DateTime, default=datetime.datetime.now)
     mvAction = Column(String(10))     
     mvQuantity = Column(DECIMAL(13, 2))
-    mvStatus = Column(String(45), default="POSTED") # Changed default based on creation logic
+    mvStatus = Column(String(45), default="POSTED") 
     mvNotes = Column(Text)
     mvCreatedby = Column(String(10), default="AI_BOT")
     mvCreateddate = Column(DateTime, default=datetime.datetime.now)
 
 class IcPrice(Base):
     __tablename__ = "icItemsPrices"
-    
     PriceID = Column(String(10), primary_key=True)
     isDeleted = Column(Boolean, default=False)
     DatabaseID = Column(String(10))
@@ -167,7 +157,6 @@ class DrProject(Base):
 
 class DrCompany(Base):
     __tablename__ = "drCompanies"
-    
     CompanyID = Column(String(50), primary_key=True)
     isDeleted = Column(Boolean, default=False)
     DatabaseID = Column(String(50))
