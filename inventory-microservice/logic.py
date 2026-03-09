@@ -307,7 +307,10 @@ def insert_document_logic(db: Session, data: dict, source_file_id: str, appsheet
             dlSubtotal=subtotal_ln,
             dlTaxes=tax_ln,
             dlTotal=total_ln,
-            dlObservations=" ".join(obs_parts) if obs_parts else None
+            dlObservations=" ".join(obs_parts) if obs_parts else None,
+            OriginID=(str(line.get("origin_id") or "")[:10]) or None,
+            DestinationID=(str(line.get("destination_id") or "")[:10]) or None,
+            dlBot="Procesado c/IA"
         )
         db.add(new_ln)
         line_number += 1
@@ -315,81 +318,158 @@ def insert_document_logic(db: Session, data: dict, source_file_id: str, appsheet
     db.commit()
     return {"status": "success", "document_id": doc_obj.DocumentID}
 
-def create_inventory_movements_logic(db: Session, document_id: str, database_id: str, image_folder_id: str = None, project_id: str = None):
-    """PASO 2: Procesamiento de Inventario con Jerarquía Maestro-Variante.
-    1. Busca variante exacta.
-    2. Si no hay variante, busca artículo maestro (BcItem).
-    3. Crea variante bajo maestro existente o crea ambos.
+def _determine_action(doc_account: str) -> str:
+    """Derives the default mvAction from the document's doAccount field.
+    CXP (Cuentas por Pagar / purchase) → IN
+    CXC (Cuentas por Cobrar / sale)     → OUT
+    Unknown                              → IN (safe default)
+    """
+    if (doc_account or "").upper() == "CXC":
+        return "OUT"
+    return "IN"
+
+
+def _make_movement(db: Session, *, mv_id: str, database_id: str, item_id: str,
+                   doc_ln_id: str, mv_date, action: str, quantity: float,
+                   origin_id: str, project_id: str, notes: str, now):
+    """Helper: create a single IcMovement row."""
+    m = IcMovement(
+        MovementID=mv_id,
+        DatabaseID=database_id,
+        OriginID=(origin_id or "")[:10] or None,
+        ProjectID=(project_id or "")[:10] or None,
+        ItemID=(item_id or "")[:10],
+        DocumentLnID=doc_ln_id,
+        mvDate=mv_date or now,
+        mvAction=action,
+        mvQuantity=quantity,
+        mvStatus="POSTED",
+        mvNotes=notes,
+        mvCreatedby="AI_BOT",
+        mvCreateddate=now,
+    )
+    db.add(m)
+    return m
+
+
+def _make_price(db: Session, *, pr_id: str, database_id: str, item_id: str,
+                mv_id: str, project_id: str, title: str, ln, now):
+    """Helper: create a single IcPrice row."""
+    p = IcPrice(
+        PriceID=pr_id,
+        DatabaseID=database_id,
+        ItemID=(item_id or "")[:10],
+        MovementID=mv_id,
+        ProjectID=(project_id or "")[:10] or None,
+        prTitle=title,
+        prDescription=(ln.dlDescription or "")[:255],
+        prQuantity=ln.dlQuantity,
+        prPrice=ln.dlUnitPrice,
+        prTax=ln.dlTaxes,
+        prTotal=ln.dlTotal,
+        prCreatedby="AI_BOT",
+        prCreateddate=now,
+        prModifiedby="AI_BOT",
+        prModifieddate=now,
+    )
+    db.add(p)
+    return p
+
+
+def create_inventory_movements_logic(db: Session, document_id: str, database_id: str,
+                                     image_folder_id: str = None, project_id: str = None):
+    """PASO 2: Procesamiento de Inventario con lógica IN / OUT / Transfer.
+
+    El tipo de movimiento se determina de la siguiente manera:
+      1. Si la línea tiene OriginID Y DestinationID → Transfer (dos movimientos: OUT + IN).
+      2. Si no, se usa doAccount del documento: CXP → IN, CXC → OUT.
+
+    Esto no altera el flujo normal de facturas (que nunca tendrán OriginID+DestinationID
+    en las líneas), pero deja la capacidad de Transfer habilitada si AppSheet lo envía.
     """
     doc = db.query(FnDocument).filter(FnDocument.DocumentID == document_id).first()
     if not doc:
         return {"error": "Documento no encontrado"}
-    
-    # Reload catalog to get latest items
+
+    # Acción base derivada del tipo de cuenta del documento
+    base_action = _determine_action(doc.doAccount)
+
     sku_map, choices_map, parent_map, variant_map = _load_product_catalog(db, database_id)
     lines = db.query(FnDocumentLn).filter(FnDocumentLn.DocumentID == document_id).all()
     created_count = 0
-    
+
     for ln in lines:
         final_supply_id = ln.SupplyID
-        
-        # Si no tiene SupplyID, intentamos match estricto de variante
         if not final_supply_id:
             final_supply_id, _ = find_product_id(ln.dlDescription, choices_map)
-            
-        # Si sigue siendo desconocido, evitamos crearlo automáticamente
         if final_supply_id == "UNKNOWN" or not final_supply_id:
-            logger.warning(f"Línea ignorada por artículo faltante (no se auto-creará): {ln.dlDescription}")
-            continue # Saltamos la creación de inventario para esta línea
+            logger.warning(f"Línea ignorada por artículo faltante: {ln.dlDescription}")
+            continue
 
-            
-        # 4. Generar Movimientos y Precios
         now = get_now_ca()
-        mv_id = str(uuid.uuid4()).replace('-', '')[:8].upper()
-        new_movement = IcMovement(
-            MovementID=mv_id,
-            DatabaseID=database_id,
-            OriginID=(doc.IssuerID or "")[:10],
-            ProjectID=(project_id or "")[:10] or None,
-            ItemID=(final_supply_id or "")[:10],
-            DocumentLnID=ln.DocumentLnID,
-            mvDate=doc.doDate or now,
-            mvAction="IN",        
-            mvQuantity=ln.dlQuantity,
-            mvStatus="POSTED",
-            mvNotes=f"Fulfillment fact {doc.doConsecutive}",
-            mvCreatedby="AI_BOT",
-            mvCreateddate=now
-        )
-        db.add(new_movement)
-        
-        pr_id = str(uuid.uuid4()).replace('-', '')[:8].upper()
-        new_price = IcPrice(
-            PriceID=pr_id,
-            DatabaseID=database_id,
-            ItemID=(final_supply_id or "")[:10],
-            MovementID=mv_id,
-            ProjectID=(project_id or "")[:10] or None,
-            prTitle="Ingreso",
-            prDescription=(ln.dlDescription or "")[:255],
-            prQuantity=ln.dlQuantity,
-            prPrice=ln.dlUnitPrice,
-            prTax=ln.dlTaxes,
-            prTotal=ln.dlTotal,
-            prCreatedby="AI_BOT",
-            prCreateddate=now,
-            prModifiedby="AI_BOT",
-            prModifieddate=now
-        )
-        db.add(new_price)
-        
-        variant = db.query(BcItemLn).filter(BcItemLn.ItemLnID == final_supply_id).first()
-        if variant:
-            variant.lnQuantity = (float(variant.lnQuantity or 0)) + float(ln.dlQuantity)
-            variant.lnAvailable = (float(variant.lnAvailable or 0)) + float(ln.dlQuantity)
-        
-        created_count += 1
-        
+        qty = float(ln.dlQuantity or 0)
+        notes_base = f"Doc {doc.doConsecutive or document_id}"
+
+        # ── TRANSFER ────────────────────────────────────────────────────────────
+        # Solo si la línea trae ambos campos de routing (enviados opcionalmente por AppSheet).
+        if ln.OriginID and ln.DestinationID:
+            # Movimiento de SALIDA desde el origen
+            out_id = str(uuid.uuid4()).replace('-', '')[:8].upper()
+            _make_movement(db, mv_id=out_id, database_id=database_id,
+                           item_id=final_supply_id, doc_ln_id=ln.DocumentLnID,
+                           mv_date=doc.doDate, action="OUT", quantity=qty,
+                           origin_id=ln.OriginID, project_id=ln.DestinationID,
+                           notes=f"{notes_base} – Traslado salida", now=now)
+            pr_out = str(uuid.uuid4()).replace('-', '')[:8].upper()
+            _make_price(db, pr_id=pr_out, database_id=database_id,
+                        item_id=final_supply_id, mv_id=out_id,
+                        project_id=ln.OriginID, title="Traslado Salida", ln=ln, now=now)
+
+            # Movimiento de ENTRADA al destino
+            in_id = str(uuid.uuid4()).replace('-', '')[:8].upper()
+            _make_movement(db, mv_id=in_id, database_id=database_id,
+                           item_id=final_supply_id, doc_ln_id=ln.DocumentLnID,
+                           mv_date=doc.doDate, action="IN", quantity=qty,
+                           origin_id=ln.DestinationID, project_id=ln.DestinationID,
+                           notes=f"{notes_base} – Traslado entrada", now=now)
+            pr_in = str(uuid.uuid4()).replace('-', '')[:8].upper()
+            _make_price(db, pr_id=pr_in, database_id=database_id,
+                        item_id=final_supply_id, mv_id=in_id,
+                        project_id=ln.DestinationID, title="Traslado Entrada", ln=ln, now=now)
+
+            # El stock neto no cambia (+-); solo registramos el movimiento doble
+            logger.info(f"Transfer registrado: {final_supply_id} |{ln.OriginID}→{ln.DestinationID}| qty={qty}")
+            created_count += 2
+
+        # ── IN / OUT ─────────────────────────────────────────────────────────────
+        else:
+            action = base_action
+            mv_id = str(uuid.uuid4()).replace('-', '')[:8].upper()
+            origin = (ln.OriginID or doc.IssuerID or "")[:10] or None
+            dest   = (ln.DestinationID or project_id or "")[:10] or None
+
+            _make_movement(db, mv_id=mv_id, database_id=database_id,
+                           item_id=final_supply_id, doc_ln_id=ln.DocumentLnID,
+                           mv_date=doc.doDate, action=action, quantity=qty,
+                           origin_id=origin, project_id=dest,
+                           notes=notes_base, now=now)
+            pr_id = str(uuid.uuid4()).replace('-', '')[:8].upper()
+            _make_price(db, pr_id=pr_id, database_id=database_id,
+                        item_id=final_supply_id, mv_id=mv_id,
+                        project_id=dest,
+                        title="Ingreso" if action == "IN" else "Salida",
+                        ln=ln, now=now)
+
+            # Ajustar el stock del variante
+            variant = db.query(BcItemLn).filter(BcItemLn.ItemLnID == final_supply_id).first()
+            if variant:
+                delta = qty if action == "IN" else -qty
+                variant.lnQuantity  = float(variant.lnQuantity  or 0) + delta
+                variant.lnAvailable = float(variant.lnAvailable or 0) + delta
+                logger.info(f"{action} aplicado: {final_supply_id} delta={delta:+.2f}")
+
+            created_count += 1
+
     db.commit()
     return {"status": "success", "movements_created": created_count}
 

@@ -116,6 +116,9 @@ class FnDocumentLn(Base):
     dlTotal = Column(DECIMAL(13, 2))
     
     dlObservations = Column(String(2000), nullable=True)
+    OriginID      = Column(String(10), nullable=True)   # Source warehouse / ProjectID (OUT / Transfer)
+    DestinationID = Column(String(10), nullable=True)   # Destination warehouse / ProjectID (IN / Transfer)
+    dlBot         = Column(Text, nullable=True)
 
 class IcMovement(Base):
     __tablename__ = "icMovements"
