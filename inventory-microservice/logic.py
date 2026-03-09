@@ -259,6 +259,7 @@ def insert_document_logic(db: Session, data: dict, source_file_id: str, appsheet
     issuer_name = issuer_data.get('cpName', 'Desconocido')
     project_info = f". Proyecto: {matched_project_id}" if matched_project_id else ""
     doc_obj.doAIComment = f"Digitalización completa. Emisor: {issuer_name}. Líneas procesadas: {num_lines}{project_info}."
+    doc_obj.Bot = "ADDED"
 
     # Se evita llamar a .delete() si no hay líneas para prevenir error de permisos (DELETE command denied)
     if db.query(FnDocumentLn).filter(FnDocumentLn.DocumentID == doc_obj.DocumentID).count() > 0:
@@ -310,7 +311,7 @@ def insert_document_logic(db: Session, data: dict, source_file_id: str, appsheet
             dlObservations=" ".join(obs_parts) if obs_parts else None,
             OriginID=(str(line.get("origin_id") or "")[:10]) or None,
             DestinationID=(str(line.get("destination_id") or "")[:10]) or None,
-            dlBot="Procesado c/IA"
+            dlBot="ADDED"
         )
         db.add(new_ln)
         line_number += 1
@@ -568,7 +569,7 @@ def upsert_company_from_invoice_logic(db: Session, data: dict, source_file_id: s
     if data.get("cpPhone"):
         company_obj.cpPhone = str(data.get("cpPhone"))[:100]
         
-    company_obj.cpBot = "Procesado c/IA"
+    company_obj.cpBot = "ADDED"
     
     now = get_now_ca()
     if is_new:
@@ -713,7 +714,7 @@ def create_item_from_url_logic(db: Session, data: dict, image_url: str, database
             itCreatedAt=now,
             itModifiedBy="AI_BOT",
             itModifiedAt=now,
-            Bot="Importado desde URL"
+            Bot="ADDED"
         )
         db.add(new_item)
         db.commit()
@@ -751,7 +752,8 @@ def create_item_from_url_logic(db: Session, data: dict, image_url: str, database
             lnCreatedBy="AI_BOT",
             lnCreatedAt=now,
             lnModifiedBy="AI_BOT",
-            lnModifiedAt=now
+            lnModifiedAt=now,
+            Bot="ADDED"
         )
         db.add(new_ln)
         db.commit()
