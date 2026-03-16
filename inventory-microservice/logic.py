@@ -1,4 +1,4 @@
-﻿from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session
 from models import BcItem, BcItemLn, FnDocument, FnDocumentLn, IcMovement, IcPrice, DrProject, DrCompany, BcBrand, IcItemsStock
 import difflib
 import uuid
@@ -481,8 +481,10 @@ def process_single_movement_logic(db: Session, data: dict):
         db.add(new_price)
         
         # 2. Actualizar la tabla consolidada icItemsStock
-        stock_id = "{}-{}".format(item_id, loc_id)
-        stock_record = db.query(IcItemsStock).filter(IcItemsStock.StockID == stock_id).first()
+        stock_record = db.query(IcItemsStock).filter(
+            IcItemsStock.ItemID == item_id,
+            IcItemsStock.ProjectID == loc_id
+        ).first()
         qty_change = qty if is_in else -qty
         
         if stock_record:
@@ -497,7 +499,8 @@ def process_single_movement_logic(db: Session, data: dict):
             if pr_id not in prices:
                 stock_record.stPrices = "{} , {}".format(prices, pr_id) if prices else pr_id
         else:
-            # Si no existe en este recinto, creamos la fila
+            # Si no existe en este recinto, creamos la fila con un ID aleatorio de 10 caracteres
+            stock_id = str(uuid.uuid4()).replace('-', '')[:10].upper()
             new_stock = IcItemsStock(
                 StockID=stock_id, DatabaseID=db_id, ItemID=item_id, ProjectID=loc_id,
                 stQuantity=qty_change, stMovements=mv_id, stPrices=pr_id
