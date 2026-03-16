@@ -487,74 +487,86 @@ def process_single_movement_logic(db: Session, data: dict):
     mv_obj.mvStatus = "POSTED"
     mv_obj.mvCreatedby = user
     mv_obj.mvCreateddate = now if not mv_obj.mvCreateddate else mv_obj.mvCreateddate
-
-    # 2. Log de Precios (Libro mayor)
-    def log_price(loc_id, q, p, pr_title):
-        if not loc_id: return
-        pid = str(uuid.uuid4()).replace('-', '')[:10].upper()
-        abs_q = abs(float(q))
-        db.add(IcPrice(
-            PriceID=pid, DatabaseID=db_id, ItemID=item_id,
-            ProjectID=loc_id, MovementID=mv_id, SupplyID=supply_id,
-            prTitle=pr_title, prDescription=f"Micro: {pr_title}",
-            prQuantity=abs_q, prPrice=p, prTotal=abs_q*p,
-            prCreatedby=user, prCreateddate=now
-        ))
-
-    # 3. Estado por Proyecto (Reflejar en AppSheet vía stModifiedAt)
-    def update_project_stock(loc_id, qty_delta):
+    # 2. Logic to update current State (icItemsStock) and Valuation (icItemsPrices)
+    def apply_delta(loc_id, delta, is_dest=False):
         if not loc_id: return
         loc_id = loc_id.strip()
-        
-        # Localizar el registro para este Producto en este Recinto
-        stock_record = db.query(IcItemsStock).filter(
+
+        # A. Update icItemsStock (The Inventory Registry - consolidates to 1 row per project/item)
+        stock_rec = db.query(IcItemsStock).filter(
             IcItemsStock.ItemID == item_id,
             IcItemsStock.ProjectID == loc_id
-        ).first()
+        ).order_by(IcItemsStock.stQuantity.desc()).first()
         
-        if stock_record:
-            stock_record.stQuantity = float(stock_record.stQuantity or 0) + float(qty_delta)
-            movs = str(stock_record.stMovements or "")
+        if stock_rec:
+            # Update existing balance
+            stock_rec.stQuantity = float(stock_rec.stQuantity or 0) + float(delta)
+            movs = str(stock_rec.stMovements or "")
             if mv_id not in movs:
-                stock_record.stMovements = "{} , {}".format(movs, mv_id) if movs else mv_id
-            stock_record.stModifiedBy = user
-            stock_record.stModifiedAt = now
+                stock_rec.stMovements = "{} , {}".format(movs, mv_id) if movs else mv_id
+            stock_rec.stModifiedBy = user
+            stock_rec.stModifiedAt = now
+            stock_rec.isDeleted = False
         else:
-            new_stock_id = str(uuid.uuid4()).replace('-', '')[:10].upper()
+            # Create if none exists (usually for first IN)
+            new_sid = str(uuid.uuid4()).replace('-', '')[:10].upper()
             db.add(IcItemsStock(
-                StockID=new_stock_id, DatabaseID=db_id, ItemID=item_id, ProjectID=loc_id,
-                stQuantity=qty_delta, stMovements=mv_id,
+                StockID=new_sid, DatabaseID=db_id, ItemID=item_id, ProjectID=loc_id,
+                stQuantity=delta, stMovements=mv_id,
                 stCreatedBy=user, stCreatedAt=now,
-                stModifiedBy=user, stModifiedAt=now,
-                isDeleted=False
+                stModifiedBy=user, stModifiedAt=now, isDeleted=False
             ))
 
-    # 4. Global Stock
-    def update_global_stock(qty_delta):
+        # B. Update icItemsPrices (The Valuation Registry - AppSheet uses TOP(FILTER(...), 1))
+        # Finding the 'best' record to subtract from (highest quantity) as requested for robustness
+        price_rec = db.query(IcPrice).filter(
+            IcPrice.ItemID == item_id,
+            IcPrice.ProjectID == loc_id,
+            IcPrice.isDeleted == False
+        ).order_by(IcPrice.prQuantity.desc()).first()
+        
+        if price_rec:
+            # Update existing lot/price record
+            price_rec.prQuantity = float(price_rec.prQuantity or 0) + float(delta)
+            price_rec.prTotal = float(price_rec.prQuantity) * float(price_rec.prPrice or price)
+            price_rec.prModifiedby = user
+            price_rec.prModifieddate = now
+            # Si es un ingreso nuevo de una transferencia, podrÃ­amos querer actualizar el tÃ­tulo?
+            # Pero mejor dejar el original para no perder contexto de compra si aplica.
+        elif delta > 0:
+            # Create new row only if we are adding stock and no record exists
+            new_pid = str(uuid.uuid4()).replace('-', '')[:10].upper()
+            db.add(IcPrice(
+                PriceID=new_pid, DatabaseID=db_id, ItemID=item_id,
+                ProjectID=loc_id, MovementID=mv_id, SupplyID=supply_id,
+                prTitle="Ingreso" if is_dest else action,
+                prDescription=f"Micro: {action}",
+                prQuantity=delta, prPrice=price, prTotal=delta*price,
+                prCreatedby=user, prCreateddate=now,
+                prModifiedby=user, prModifieddate=now
+            ))
+
+    # Helper for global totals (bcItemsLns)
+    def update_global(delta):
         variant = db.query(BcItemLn).filter(BcItemLn.ItemLnID == item_id).first()
         if variant:
-            variant.lnQuantity = float(variant.lnQuantity or 0) + float(qty_delta)
-            variant.lnAvailable = float(variant.lnAvailable or 0) + float(qty_delta)
+            variant.lnQuantity = float(variant.lnQuantity or 0) + float(delta)
+            variant.lnAvailable = float(variant.lnAvailable or 0) + float(delta)
             variant.lnModifiedBy = user
             variant.lnModifiedAt = now
             variant.isDeleted = False
 
-    # Ejecutar lógica según acción
+    # Execute State Synchronization
     if action == 'Transfer':
-        # En el libro mayor, la transferencia afecta a ambos
-        log_price(origin_id, -qty, price, "Transferencia (Salida)")
-        log_price(dest_id, qty, price, "Transferencia (Ingreso)")
-        # En el estado por proyecto, actualizamos los dos
-        update_project_stock(origin_id, -qty)
-        update_project_stock(dest_id, qty)
+        # Substract from Origin, Add to Destination (Updates existing rows)
+        apply_delta(origin_id, -qty)
+        apply_delta(dest_id, qty, is_dest=True)
     elif action == 'IN':
-        log_price(dest_id, qty, price, "Ingreso")
-        update_project_stock(dest_id, qty)
-        update_global_stock(qty)
+        apply_delta(dest_id, qty, is_dest=True)
+        update_global(qty)
     elif action == 'OUT':
-        log_price(origin_id, -qty, price, "Salida")
-        update_project_stock(origin_id, -qty)
-        update_global_stock(-qty)
+        apply_delta(origin_id, -qty)
+        update_global(-qty)
 
     db.commit()
     return {"status": "success", "processed_action": action, "item_id": item_id}
