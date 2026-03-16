@@ -3,6 +3,7 @@ import os
 import logging
 import functools
 import time
+import re
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload, MediaIoBaseUpload
@@ -43,7 +44,23 @@ def get_drive_service(impersonate_user: str = None):
         return None
 
 def resolve_file_id(file_id_or_path: str) -> str:
-    if not file_id_or_path or '/' not in file_id_or_path:
+    if not file_id_or_path:
+        return file_id_or_path
+        
+    # Pattern for https://drive.google.com/file/d/[ID]/view...
+    url_pattern1 = r"/file/d/([a-zA-Z0-9_-]+)"
+    # Pattern for https://drive.google.com/open?id=[ID]
+    url_pattern2 = r"id=([a-zA-Z0-9_-]+)"
+    
+    match1 = re.search(url_pattern1, file_id_or_path)
+    if match1:
+        return match1.group(1)
+        
+    match2 = re.search(url_pattern2, file_id_or_path)
+    if match2:
+        return match2.group(1)
+
+    if '/' not in file_id_or_path:
         return file_id_or_path  
     
     filename = file_id_or_path.strip('/').split('/')[-1]
@@ -76,9 +93,16 @@ def download_with_validation(file_id):
         if not service:
             return None, None
         
-        meta = service.files().get(fileId=file_id, fields="name, mimeType").execute()
+        meta = service.files().get(
+            fileId=file_id, 
+            fields="name, mimeType",
+            supportsAllDrives=True
+        ).execute()
         
-        request = service.files().get_media(fileId=file_id)
+        request = service.files().get_media(
+            fileId=file_id,
+            supportsAllDrives=True
+        )
         file_stream = io.BytesIO()
         downloader = MediaIoBaseDownload(file_stream, request)
         
@@ -88,7 +112,8 @@ def download_with_validation(file_id):
             
         file_stream.seek(0)
         return file_stream.read(), meta
-    except:
+    except Exception as e:
+        logger.error(f"Error downloading file {file_id}: {str(e)}")
         return None, None
 
 @functools.lru_cache(maxsize=128)
