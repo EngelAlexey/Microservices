@@ -500,32 +500,29 @@ def process_single_movement_logic(db: Session, data: dict):
     ))
 
     # 3. Estado por Proyecto (Reflejar en AppSheet vía stModifiedAt)
-    def update_project_stock(loc_id, qty_delta, row_action=None):
+    def update_project_stock(loc_id, qty_delta):
         if not loc_id: return
         loc_id = loc_id.strip()
-        agg_action = row_action or action
         
-        # El usuario quiere una fila por Proyecto + Item + Acción
+        # Un solo registro por Producto + Recinto (Neto)
         stock_record = db.query(IcItemsStock).filter(
             IcItemsStock.ItemID == item_id,
             IcItemsStock.ProjectID == loc_id,
-            IcItemsStock.stAction == agg_action
+            IcItemsStock.DatabaseID == db_id,
+            IcItemsStock.isDeleted == False
         ).first()
         
         if stock_record:
-            # Sumar al acumulado de esa acción
             stock_record.stQuantity = float(stock_record.stQuantity or 0) + float(qty_delta)
             movs = str(stock_record.stMovements or "")
             if mv_id not in movs:
                 stock_record.stMovements = "{} , {}".format(movs, mv_id) if movs else mv_id
             stock_record.stModifiedBy = user
             stock_record.stModifiedAt = now
-            stock_record.isDeleted = False
         else:
             new_stock_id = str(uuid.uuid4()).replace('-', '')[:10].upper()
             db.add(IcItemsStock(
                 StockID=new_stock_id, DatabaseID=db_id, ItemID=item_id, ProjectID=loc_id,
-                stAction=agg_action,
                 stQuantity=qty_delta, stMovements=mv_id,
                 stCreatedBy=user, stCreatedAt=now,
                 stModifiedBy=user, stModifiedAt=now,
@@ -543,13 +540,13 @@ def process_single_movement_logic(db: Session, data: dict):
             variant.isDeleted = False
 
     if action == 'Transfer':
-        update_project_stock(origin_id, -qty, row_action='OUT')
-        update_project_stock(dest_id, qty, row_action='IN')
+        update_project_stock(origin_id, -qty)
+        update_project_stock(dest_id, qty)
     elif action == 'IN':
-        update_project_stock(dest_id, qty, row_action='IN')
+        update_project_stock(dest_id, qty)
         update_global_stock(qty)
     elif action == 'OUT':
-        update_project_stock(origin_id, -qty, row_action='OUT')
+        update_project_stock(origin_id, -qty)
         update_global_stock(-qty)
 
     db.commit()

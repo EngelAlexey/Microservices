@@ -193,7 +193,6 @@ class IcItemsStock(Base):
     DatabaseID = Column(String(10))
     ItemID = Column(String(20), nullable=False)
     ProjectID = Column(String(10), nullable=False)
-    stAction = Column(String(20))
     stQuantity = Column(DECIMAL(13, 2), default=0.00)
     stMovements = Column(Text)
     stPrices = Column(Text)
