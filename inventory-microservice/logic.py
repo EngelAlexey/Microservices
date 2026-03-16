@@ -1,5 +1,5 @@
 from sqlalchemy.orm import Session
-from models import BcItem, BcItemLn, FnDocument, FnDocumentLn, IcMovement, IcPrice, DrProject, DrCompany, BcBrand
+from models import BcItem, BcItemLn, FnDocument, FnDocumentLn, IcMovement, IcPrice, DrProject, DrCompany, BcBrand, IcItemsStock
 import difflib
 import uuid
 from datetime import datetime, timedelta, timezone

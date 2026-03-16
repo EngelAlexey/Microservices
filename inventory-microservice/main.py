@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 from database import get_db, SessionLocal
 from models import FnDocument 
 from ai_services import extract_invoice_data, extract_company_data, extract_product_from_html
-from logic import insert_document_logic, upsert_company_from_invoice_logic, create_item_from_url_logic, create_inventory_movements_logic
+from logic import insert_document_logic, upsert_company_from_invoice_logic, create_item_from_url_logic, create_inventory_movements_logic, process_single_movement_logic
 from drive_services import download_with_validation, resolve_file_id
 from scrape_services import scrape_product_page
 
@@ -38,6 +38,16 @@ class UrlPayload(BaseModel):
     database_id: str
     image_folder_id: str | None = None
     item_id: str | None = None
+
+class SingleMovementPayload(BaseModel):
+    movement_id: str
+    database_id: str
+    item_id: str
+    origin_id: str | None = None
+    project_id: str | None = None
+    qty: float
+    action: str
+    created_by: str | None = "AppSheet"
 
 @app.get("/")
 def read_root():
@@ -134,6 +144,16 @@ async def extract_from_url(payload: UrlPayload, db: Session = Depends(get_db)):
         )
         return {"status": "success", "source_url": payload.url, "data": result}
     except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/webhook/process-movement")
+async def process_movement_endpoint(payload: SingleMovementPayload, db: Session = Depends(get_db)):
+    try:
+        # Ejecutamos la lógica en el mismo hilo de la petición HTTP para bloquear a AppSheet
+        result = process_single_movement_logic(db, payload.model_dump())
+        return {"status": "success", "data": result}
+    except Exception as e:
+        logger.error(f"Error procesando movimiento: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":
