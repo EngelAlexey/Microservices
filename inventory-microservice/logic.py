@@ -460,13 +460,13 @@ def process_single_movement_logic(db: Session, data: dict):
     origin_id = data.get("origin_id")
     dest_id = data.get("project_id")
     qty = float(data.get("qty", 0.0))
+    price = float(data.get("price", 0.0))
+    supply_id = data.get("supply_id")
     action = data.get("action")
-    user = data.get("created_by", "AppSheet")
+    user = data.get("created_by", "AI_BOT")
     now = get_now_ca()
 
-    logger.info(f"Processing movement {mv_id} for item {item_id}. Action: {action}, Qty: {qty}, Origin: {origin_id}, Dest: {dest_id}")
-
-    logger.info(f"Processing movement {mv_id} for item {item_id}. Action: {action}, Qty: {qty}, Origin: {origin_id}, Dest: {dest_id}")
+    logger.info(f"Processing movement {mv_id} for item {item_id}. Action: {action}, Qty: {qty}, Price: {price}, Origin: {origin_id}, Dest: {dest_id}")
 
     # 1. Gestionar el Movimiento (Upsert)
     # AppSheet guarda la fila primero (DRAFT) y luego activa el bot.
@@ -493,7 +493,22 @@ def process_single_movement_logic(db: Session, data: dict):
     mv_obj.mvCreatedby = user
     mv_obj.mvCreateddate = now if not mv_obj.mvCreateddate else mv_obj.mvCreateddate
 
-    # 2. Actualizar el Estado por Proyecto (State - Una fila por Item/Recinto)
+    # 2. Registrar Log de Costos/Precios (icItemsPrices)
+    # Creamos un registro de precio para cada movimiento de entrada/salida
+    price_id = str(uuid.uuid4()).replace('-', '')[:10].upper()
+    new_price = IcPrice(
+        PriceID=price_id, DatabaseID=db_id, ItemID=item_id,
+        ProjectID=dest_id or origin_id, # Usar el que esté disponible
+        MovementID=mv_id, SupplyID=supply_id,
+        prTitle=f"Bot Move: {action}",
+        prDescription=f"Processed by Microservice logic for {action}",
+        prQuantity=qty, prPrice=price, prTotal=qty*price,
+        prCreatedby=user, prCreateddate=now
+    )
+    db.add(new_price)
+    logger.info(f"Price log created in icItemsPrices: {price_id}")
+
+    # 3. Actualizar el Estado por Proyecto (State - Una fila por Item/Recinto)
     def update_project_stock(loc_id, qty_delta):
         if not loc_id:
             logger.info("No location ID provided for project stock update. Skipping.")
@@ -522,7 +537,7 @@ def process_single_movement_logic(db: Session, data: dict):
             )
             db.add(new_stock)
 
-    # 3. Actualizar el Stock Total (bcItemsLns)
+    # 4. Actualizar el Stock Total (bcItemsLns)
     def update_global_stock(qty_delta):
         logger.info(f"Updating global stock for ItemLnID: {item_id}, Delta: {qty_delta}")
         variant = db.query(BcItemLn).filter(BcItemLn.ItemLnID == item_id).first()

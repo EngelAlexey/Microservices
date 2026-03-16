@@ -46,8 +46,10 @@ class SingleMovementPayload(BaseModel):
     origin_id: str | None = None
     project_id: str | None = None
     qty: float
+    price: float | None = 0.0
+    supply_id: str | None = None
     action: str
-    created_by: str | None = "AppSheet"
+    created_by: str | None = "AI_BOT"
 
 @app.get("/")
 def read_root():
