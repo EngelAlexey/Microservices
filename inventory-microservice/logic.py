@@ -504,12 +504,10 @@ def process_single_movement_logic(db: Session, data: dict):
         if not loc_id: return
         loc_id = loc_id.strip()
         
-        # Un solo registro por Producto + Recinto (Neto)
+        # Localizar el registro para este Producto en este Recinto
         stock_record = db.query(IcItemsStock).filter(
             IcItemsStock.ItemID == item_id,
-            IcItemsStock.ProjectID == loc_id,
-            IcItemsStock.DatabaseID == db_id,
-            IcItemsStock.isDeleted == False
+            IcItemsStock.ProjectID == loc_id
         ).first()
         
         if stock_record:
