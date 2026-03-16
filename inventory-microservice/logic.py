@@ -492,11 +492,12 @@ def process_single_movement_logic(db: Session, data: dict):
     def log_price(loc_id, q, p, pr_title):
         if not loc_id: return
         pid = str(uuid.uuid4()).replace('-', '')[:10].upper()
+        abs_q = abs(float(q))
         db.add(IcPrice(
             PriceID=pid, DatabaseID=db_id, ItemID=item_id,
             ProjectID=loc_id, MovementID=mv_id, SupplyID=supply_id,
             prTitle=pr_title, prDescription=f"Micro: {pr_title}",
-            prQuantity=q, prPrice=p, prTotal=q*p,
+            prQuantity=abs_q, prPrice=p, prTotal=abs_q*p,
             prCreatedby=user, prCreateddate=now
         ))
 
