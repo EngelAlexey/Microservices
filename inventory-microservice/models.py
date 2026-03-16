@@ -136,6 +136,7 @@ class IcPrice(Base):
     DatabaseID = Column(String(10))
     ItemID = Column(String(10))
     ProjectID = Column(String(10), nullable=True)
+    SupplyID = Column(String(10), nullable=True)
     MovementID = Column(String(10)) 
     prTitle = Column(String(150))   
     prDescription = Column(Text)
