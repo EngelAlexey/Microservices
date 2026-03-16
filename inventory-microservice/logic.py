@@ -466,20 +466,10 @@ def process_single_movement_logic(db: Session, data: dict):
 
     logger.info(f"Processing movement {mv_id} for item {item_id}. Action: {action}, Qty: {qty}, Origin: {origin_id}, Dest: {dest_id}")
 
-    # 0. Identificar el Item/Variante (bcItemsLns)
-    # Buscamos primero por ItemLnID (Variante) o ItemID (Padre)
-    variant = db.query(BcItemLn).filter(BcItemLn.ItemLnID == item_id).first()
-    if not variant:
-        # Reintento buscando por ItemID si el que mandan es el ID del padre
-        variant = db.query(BcItemLn).filter(BcItemLn.ItemID == item_id).first()
-    
-    parent_id = variant.ItemID if variant else item_id
-    item_ln_id = variant.ItemLnID if variant else item_id # Usar el específico si se encuentra
-
-    if not variant:
-        logger.warning(f"No variant record found in bcItemsLns for ID '{item_id}'. Stock updates might be incomplete.")
+    logger.info(f"Processing movement {mv_id} for item {item_id}. Action: {action}, Qty: {qty}, Origin: {origin_id}, Dest: {dest_id}")
 
     # 1. Gestionar el Movimiento (Upsert)
+    # AppSheet guarda la fila primero (DRAFT) y luego activa el bot.
     mv_obj = db.query(IcMovement).filter(IcMovement.MovementID == mv_id).first()
     
     if mv_obj and mv_obj.mvStatus == "POSTED":
@@ -491,9 +481,9 @@ def process_single_movement_logic(db: Session, data: dict):
         mv_obj = IcMovement(MovementID=mv_id)
         db.add(mv_obj)
 
-    # Actualizar campos del movimiento (Usamos el ID especÃ­fico del item/variante)
+    # Actualizar campos del movimiento (ItemID siempre guarda el ID del producto/variante)
     mv_obj.DatabaseID = db_id
-    mv_obj.ItemID = item_ln_id 
+    mv_obj.ItemID = item_id 
     mv_obj.OriginID = origin_id if origin_id else None
     mv_obj.ProjectID = dest_id if dest_id else None
     mv_obj.mvAction = action
@@ -509,48 +499,41 @@ def process_single_movement_logic(db: Session, data: dict):
             logger.info("No location ID provided for project stock update. Skipping.")
             return
         
-        logger.info(f"Updating project stock for Recinto: {loc_id}, Item: {item_ln_id}, Delta: {qty_delta}")
+        logger.info(f"Updating project stock for Recinto: {loc_id}, Item: {item_id}, Delta: {qty_delta}")
         
-        # Primero intentamos buscarlo con el ID especÃ­fico
         stock_record = db.query(IcItemsStock).filter(
-            IcItemsStock.ItemID == item_ln_id,
+            IcItemsStock.ItemID == item_id,
             IcItemsStock.ProjectID == loc_id
         ).first()
-
-        # Si no existe, y el item_ln_id es distinto al parent_id, intentamos con el parent
-        if not stock_record and item_ln_id != parent_id:
-             stock_record = db.query(IcItemsStock).filter(
-                IcItemsStock.ItemID == parent_id,
-                IcItemsStock.ProjectID == loc_id
-            ).first()
         
         if stock_record:
-            logger.info(f"Existing stock record found for item {stock_record.ItemID} in {loc_id}. Current Qty: {stock_record.stQuantity}")
+            logger.info(f"Existing stock record found for item {item_id} in {loc_id}. Current Qty: {stock_record.stQuantity}")
             stock_record.stQuantity = float(stock_record.stQuantity or 0) + float(qty_delta)
-            stock_record.ItemID = item_ln_id # Aseguramos que use el ID mÃ¡s especÃ­fico de ahora en adelante
             movs = str(stock_record.stMovements or "")
             if mv_id not in movs:
                 stock_record.stMovements = "{} , {}".format(movs, mv_id) if movs else mv_id
         else:
             # Crear registro de estado para este nuevo recinto
-            logger.info(f"No stock record found for item {item_ln_id} in {loc_id}. Creating new one.")
+            logger.info(f"No stock record found for item {item_id} in {loc_id}. Creating new one.")
             new_stock_id = str(uuid.uuid4()).replace('-', '')[:10].upper()
             new_stock = IcItemsStock(
-                StockID=new_stock_id, DatabaseID=db_id, ItemID=item_ln_id, ProjectID=loc_id,
+                StockID=new_stock_id, DatabaseID=db_id, ItemID=item_id, ProjectID=loc_id,
                 stQuantity=qty_delta, stMovements=mv_id
             )
             db.add(new_stock)
 
     # 3. Actualizar el Stock Total (bcItemsLns)
     def update_global_stock(qty_delta):
+        logger.info(f"Updating global stock for ItemLnID: {item_id}, Delta: {qty_delta}")
+        variant = db.query(BcItemLn).filter(BcItemLn.ItemLnID == item_id).first()
         if variant:
-            logger.info(f"Updating global stock for Variant {variant.ItemLnID}. Current Total: {variant.lnQuantity}, Delta: {qty_delta}")
+            logger.info(f"Variant found for ItemLnID {item_id}. Current Total: {variant.lnQuantity}")
             variant.lnQuantity = float(variant.lnQuantity or 0) + float(qty_delta)
             variant.lnAvailable = float(variant.lnAvailable or 0) + float(qty_delta)
             variant.lnModifiedBy = user
             variant.lnModifiedAt = now
         else:
-            logger.warning(f"Cannot update global stock: No variant found for {item_id}")
+            logger.warning(f"No product variant found in bcItemsLns for ID: {item_id}")
 
     # Procesar segÃºn la acciÃ³n
     if action == 'Transfer':
@@ -565,4 +548,4 @@ def process_single_movement_logic(db: Session, data: dict):
 
     db.commit()
     logger.info(f"Transaction committed for movement {mv_id}. Result: SUCCESS")
-    return {"status": "success", "processed_action": action, "item_id": item_ln_id}
+    return {"status": "success", "processed_action": action, "item_id": item_id}
