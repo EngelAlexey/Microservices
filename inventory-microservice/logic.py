@@ -464,16 +464,29 @@ def process_single_movement_logic(db: Session, data: dict):
     user = data.get("created_by", "AppSheet")
     now = get_now_ca()
 
-    # 1. Registrar el Movimiento (History Log - Una fila por acciÃ³n)
-    # Si es Transfer, guardamos tanto origen como destino en la misma fila
-    new_mv = IcMovement(
-        MovementID=mv_id, DatabaseID=db_id, ItemID=item_id,
-        OriginID=origin_id if origin_id else None,
-        ProjectID=dest_id if dest_id else None,
-        mvAction=action, mvQuantity=qty, mvDate=now,
-        mvStatus="POSTED", mvCreatedby=user, mvCreateddate=now
-    )
-    db.add(new_mv)
+    # 1. Gestionar el Movimiento (Upsert)
+    # AppSheet guarda la fila primero (DRAFT) y luego activa el bot.
+    # Si la fila ya existe, la actualizamos. Si no, la creamos.
+    mv_obj = db.query(IcMovement).filter(IcMovement.MovementID == mv_id).first()
+    
+    if mv_obj and mv_obj.mvStatus == "POSTED":
+        return {"status": "skipped", "reason": "Movimiento ya procesado (POSTED)", "movement_id": mv_id}
+
+    if not mv_obj:
+        mv_obj = IcMovement(MovementID=mv_id)
+        db.add(mv_obj)
+
+    # Actualizar campos del movimiento
+    mv_obj.DatabaseID = db_id
+    mv_obj.ItemID = item_id
+    mv_obj.OriginID = origin_id if origin_id else None
+    mv_obj.ProjectID = dest_id if dest_id else None
+    mv_obj.mvAction = action
+    mv_obj.mvQuantity = qty
+    mv_obj.mvDate = now
+    mv_obj.mvStatus = "POSTED"
+    mv_obj.mvCreatedby = user
+    mv_obj.mvCreateddate = now if not mv_obj.mvCreateddate else mv_obj.mvCreateddate
 
     # 2. Actualizar el Estado por Proyecto (State - Una fila por Item/Recinto)
     def update_project_stock(loc_id, qty_delta):
