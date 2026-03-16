@@ -464,57 +464,60 @@ def process_single_movement_logic(db: Session, data: dict):
     user = data.get("created_by", "AppSheet")
     now = get_now_ca()
 
-    def apply_stock(loc_id, is_in: bool):
+    # 1. Registrar el Movimiento (History Log - Una fila por acciÃ³n)
+    # Si es Transfer, guardamos tanto origen como destino en la misma fila
+    new_mv = IcMovement(
+        MovementID=mv_id, DatabaseID=db_id, ItemID=item_id,
+        OriginID=origin_id if origin_id else None,
+        ProjectID=dest_id if dest_id else None,
+        mvAction=action, mvQuantity=qty, mvDate=now,
+        mvStatus="POSTED", mvCreatedby=user, mvCreateddate=now
+    )
+    db.add(new_mv)
+
+    # 2. Actualizar el Estado por Proyecto (State - Una fila por Item/Recinto)
+    def update_project_stock(loc_id, qty_delta):
         if not loc_id: return
-        
-        # 1. Crear el registro en icItemsPrices
-        import uuid
-        pr_id = str(uuid.uuid4()).replace('-', '')[:10].upper()
-        title = "IN" if is_in else "OUT"
-        
-        new_price = IcPrice(
-            PriceID=pr_id, DatabaseID=db_id, ItemID=item_id,
-            ProjectID=loc_id, MovementID=mv_id,
-            prTitle=title, prQuantity=qty, prPrice=0, prTax=0, prTotal=0,
-            prCreatedby=user, prCreateddate=now
-        )
-        db.add(new_price)
-        
-        # 2. Actualizar la tabla consolidada icItemsStock
         stock_record = db.query(IcItemsStock).filter(
             IcItemsStock.ItemID == item_id,
             IcItemsStock.ProjectID == loc_id
         ).first()
-        qty_change = qty if is_in else -qty
         
         if stock_record:
-            stock_record.stQuantity = float(stock_record.stQuantity or 0) + float(qty_change)
-            
-            # Concatenar IDs de forma segura
+            stock_record.stQuantity = float(stock_record.stQuantity or 0) + float(qty_delta)
+            # Mantener logs de IDs si es necesario, pero el usuario quiere algo "limpio"
             movs = str(stock_record.stMovements or "")
             if mv_id not in movs:
                 stock_record.stMovements = "{} , {}".format(movs, mv_id) if movs else mv_id
-                
-            prices = str(stock_record.stPrices or "")
-            if pr_id not in prices:
-                stock_record.stPrices = "{} , {}".format(prices, pr_id) if prices else pr_id
         else:
-            # Si no existe en este recinto, creamos la fila con un ID aleatorio de 10 caracteres
-            stock_id = str(uuid.uuid4()).replace('-', '')[:10].upper()
+            # Crear registro de estado para este nuevo recinto
+            new_stock_id = str(uuid.uuid4()).replace('-', '')[:10].upper()
             new_stock = IcItemsStock(
-                StockID=stock_id, DatabaseID=db_id, ItemID=item_id, ProjectID=loc_id,
-                stQuantity=qty_change, stMovements=mv_id, stPrices=pr_id
+                StockID=new_stock_id, DatabaseID=db_id, ItemID=item_id, ProjectID=loc_id,
+                stQuantity=qty_delta, stMovements=mv_id
             )
             db.add(new_stock)
 
-    # Evaluar la acción que manda AppSheet
+    # 3. Actualizar el Stock Total (bcItemsLns)
+    def update_global_stock(qty_delta):
+        variant = db.query(BcItemLn).filter(BcItemLn.ItemID == item_id).first()
+        if variant:
+            variant.lnQuantity = float(variant.lnQuantity or 0) + float(qty_delta)
+            variant.lnAvailable = float(variant.lnAvailable or 0) + float(qty_delta)
+            variant.lnModifiedBy = user
+            variant.lnModifiedAt = now
+
+    # Procesar segÃºn la acciÃ³n
     if action == 'Transfer':
-        apply_stock(origin_id, is_in=False) # Resta del origen
-        apply_stock(dest_id, is_in=True)    # Suma al destino
+        update_project_stock(origin_id, -qty) # Resta del origen
+        update_project_stock(dest_id, qty)    # Suma al destino
+        # En transferencia el total global no cambia
     elif action == 'IN':
-        apply_stock(dest_id, is_in=True)
+        update_project_stock(dest_id, qty)
+        update_global_stock(qty)
     elif action == 'OUT':
-        apply_stock(origin_id, is_in=False)
+        update_project_stock(origin_id, -qty)
+        update_global_stock(-qty)
 
     db.commit()
     return {"status": "success", "processed_action": action, "item_id": item_id}
