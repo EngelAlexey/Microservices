@@ -488,16 +488,17 @@ def process_single_movement_logic(db: Session, data: dict):
     mv_obj.mvCreatedby = user
     mv_obj.mvCreateddate = now if not mv_obj.mvCreateddate else mv_obj.mvCreateddate
 
-    # 2. Log de Precios
-    price_id = str(uuid.uuid4()).replace('-', '')[:10].upper()
-    db.add(IcPrice(
-        PriceID=price_id, DatabaseID=db_id, ItemID=item_id,
-        ProjectID=dest_id or origin_id,
-        MovementID=mv_id, SupplyID=supply_id,
-        prTitle=action, prDescription=f"Micro: {action}",
-        prQuantity=qty, prPrice=price, prTotal=qty*price,
-        prCreatedby=user, prCreateddate=now
-    ))
+    # 2. Log de Precios (Libro mayor)
+    def log_price(loc_id, q, p, pr_title):
+        if not loc_id: return
+        pid = str(uuid.uuid4()).replace('-', '')[:10].upper()
+        db.add(IcPrice(
+            PriceID=pid, DatabaseID=db_id, ItemID=item_id,
+            ProjectID=loc_id, MovementID=mv_id, SupplyID=supply_id,
+            prTitle=pr_title, prDescription=f"Micro: {pr_title}",
+            prQuantity=q, prPrice=p, prTotal=q*p,
+            prCreatedby=user, prCreateddate=now
+        ))
 
     # 3. Estado por Proyecto (Reflejar en AppSheet vía stModifiedAt)
     def update_project_stock(loc_id, qty_delta):
@@ -537,13 +538,20 @@ def process_single_movement_logic(db: Session, data: dict):
             variant.lnModifiedAt = now
             variant.isDeleted = False
 
+    # Ejecutar lógica según acción
     if action == 'Transfer':
+        # En el libro mayor, la transferencia afecta a ambos
+        log_price(origin_id, -qty, price, "Transferencia (Salida)")
+        log_price(dest_id, qty, price, "Transferencia (Ingreso)")
+        # En el estado por proyecto, actualizamos los dos
         update_project_stock(origin_id, -qty)
         update_project_stock(dest_id, qty)
     elif action == 'IN':
+        log_price(dest_id, qty, price, "Ingreso")
         update_project_stock(dest_id, qty)
         update_global_stock(qty)
     elif action == 'OUT':
+        log_price(origin_id, -qty, price, "Salida")
         update_project_stock(origin_id, -qty)
         update_global_stock(-qty)
 
