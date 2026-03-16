@@ -492,7 +492,7 @@ def process_single_movement_logic(db: Session, data: dict):
     price_id = str(uuid.uuid4()).replace('-', '')[:10].upper()
     db.add(IcPrice(
         PriceID=price_id, DatabaseID=db_id, ItemID=item_id,
-        ProjectID=dest_id or origin_id, SettlementID=None,
+        ProjectID=dest_id or origin_id,
         MovementID=mv_id, SupplyID=supply_id,
         prTitle=action, prDescription=f"Micro: {action}",
         prQuantity=qty, prPrice=price, prTotal=qty*price,
