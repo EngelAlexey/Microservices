@@ -466,17 +466,14 @@ def process_single_movement_logic(db: Session, data: dict):
     user = str(data.get("created_by", "AI_BOT")).strip()
     now = get_now_ca()
 
-    logger.info(f"Processing movement {mv_id} for item {item_id}. Action: {action}, Qty: {qty}, Price: {price}, Origin: {origin_id}, Dest: {dest_id}")
+    logger.info(f"Processing movement {mv_id} for item {item_id}. Action: {action}")
 
-    # 1. Gestionar el Movimiento (Upsert)
+    # 1. Movimiento (Upsert)
     mv_obj = db.query(IcMovement).filter(IcMovement.MovementID == mv_id).first()
-    
     if mv_obj and mv_obj.mvStatus == "POSTED":
-        logger.info(f"Movement {mv_id} already POSTED. Skipping workflow.")
-        return {"status": "skipped", "reason": "Movimiento ya procesado (POSTED)", "movement_id": mv_id}
+        return {"status": "skipped", "reason": "POSTED", "movement_id": mv_id}
 
     if not mv_obj:
-        logger.info(f"Movement {mv_id} not found in icMovements. Creating record.")
         mv_obj = IcMovement(MovementID=mv_id)
         db.add(mv_obj)
 
@@ -491,28 +488,21 @@ def process_single_movement_logic(db: Session, data: dict):
     mv_obj.mvCreatedby = user
     mv_obj.mvCreateddate = now if not mv_obj.mvCreateddate else mv_obj.mvCreateddate
 
-    # 2. Registrar Log de Costos/Precios (icItemsPrices)
+    # 2. Log de Precios
     price_id = str(uuid.uuid4()).replace('-', '')[:10].upper()
-    new_price = IcPrice(
+    db.add(IcPrice(
         PriceID=price_id, DatabaseID=db_id, ItemID=item_id,
-        ProjectID=dest_id or origin_id, 
+        ProjectID=dest_id or origin_id, SettlementID=None,
         MovementID=mv_id, SupplyID=supply_id,
-        prTitle=action,
-        prDescription=f"Microservice: {action}",
+        prTitle=action, prDescription=f"Micro: {action}",
         prQuantity=qty, prPrice=price, prTotal=qty*price,
         prCreatedby=user, prCreateddate=now
-    )
-    db.add(new_price)
-    logger.info(f"Price log added to session: {price_id}")
+    ))
 
-    # 3. Actualizar el Estado por Proyecto (State)
+    # 3. Estado por Proyecto (Reflejar en AppSheet vía stModifiedAt)
     def update_project_stock(loc_id, qty_delta):
-        if not loc_id:
-            logger.info("No location ID provided. Skipping project stock update.")
-            return
-        
+        if not loc_id: return
         loc_id = loc_id.strip()
-        logger.info(f"Updating project stock -> Item: {item_id}, Project: {loc_id}, Delta: {qty_delta}")
         
         stock_record = db.query(IcItemsStock).filter(
             IcItemsStock.ItemID == item_id,
@@ -520,36 +510,33 @@ def process_single_movement_logic(db: Session, data: dict):
         ).first()
         
         if stock_record:
-            logger.info(f"Existing stock record found. ID: {stock_record.StockID}, Current Qty: {stock_record.stQuantity}")
             stock_record.stQuantity = float(stock_record.stQuantity or 0) + float(qty_delta)
             movs = str(stock_record.stMovements or "")
             if mv_id not in movs:
                 stock_record.stMovements = "{} , {}".format(movs, mv_id) if movs else mv_id
+            stock_record.stModifiedBy = user
+            stock_record.stModifiedAt = now
+            stock_record.isDeleted = False
         else:
             new_stock_id = str(uuid.uuid4()).replace('-', '')[:10].upper()
-            logger.info(f"No stock record found. Creating new one with ID: {new_stock_id}")
-            new_stock = IcItemsStock(
+            db.add(IcItemsStock(
                 StockID=new_stock_id, DatabaseID=db_id, ItemID=item_id, ProjectID=loc_id,
-                stQuantity=qty_delta, stMovements=mv_id
-            )
-            db.add(new_stock)
-            db.flush() # Forzar envÃ­o para detectar errores de integridad inmediatos
-            logger.info(f"New stock record flushed to session: {new_stock_id}")
+                stQuantity=qty_delta, stMovements=mv_id,
+                stCreatedBy=user, stCreatedAt=now,
+                stModifiedBy=user, stModifiedAt=now,
+                isDeleted=False
+            ))
 
-    # 4. Actualizar el Stock Total (bcItemsLns)
+    # 4. Global Stock
     def update_global_stock(qty_delta):
-        logger.info(f"Updating global stock -> ItemLnID: {item_id}, Delta: {qty_delta}")
         variant = db.query(BcItemLn).filter(BcItemLn.ItemLnID == item_id).first()
         if variant:
-            logger.info(f"Variant found. Current Total: {variant.lnQuantity}")
             variant.lnQuantity = float(variant.lnQuantity or 0) + float(qty_delta)
             variant.lnAvailable = float(variant.lnAvailable or 0) + float(qty_delta)
             variant.lnModifiedBy = user
             variant.lnModifiedAt = now
-        else:
-            logger.warning(f"No variant found in bcItemsLns for ID: {item_id}")
+            variant.isDeleted = False
 
-    # Ejecutar lÃ³gica de stock
     if action == 'Transfer':
         update_project_stock(origin_id, -qty)
         update_project_stock(dest_id, qty)
@@ -560,7 +547,5 @@ def process_single_movement_logic(db: Session, data: dict):
         update_project_stock(origin_id, -qty)
         update_global_stock(-qty)
 
-    logger.info(f"Final session check - Pending new objects: {len(db.new)}")
     db.commit()
-    logger.info(f"Transaction committed for movement {mv_id}. Result: SUCCESS")
-    return {"status": "success", "processed_action": action, "item_id": item_id, "movement_id": mv_id}
+    return {"status": "success", "processed_action": action, "item_id": item_id}

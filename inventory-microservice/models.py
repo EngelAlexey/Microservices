@@ -188,10 +188,14 @@ class DrCompany(Base):
 
 class IcItemsStock(Base):
     __tablename__ = "icItemsStock"
-    StockID = Column(String(50), primary_key=True)
+    isDeleted = Column(Boolean, default=False)
     DatabaseID = Column(String(10))
     ItemID = Column(String(20), nullable=False)
     ProjectID = Column(String(10), nullable=False)
     stQuantity = Column(DECIMAL(13, 2), default=0.00)
     stMovements = Column(Text)
     stPrices = Column(Text)
+    stCreatedBy = Column(String(50))
+    stCreatedAt = Column(DateTime)
+    stModifiedBy = Column(String(50))
+    stModifiedAt = Column(DateTime)
