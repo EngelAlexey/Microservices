@@ -1,4 +1,4 @@
-from sqlalchemy.orm import Session
+﻿from sqlalchemy.orm import Session
 from models import BcItem, BcItemLn, FnDocument, FnDocumentLn, IcMovement, IcPrice, DrProject, DrCompany, BcBrand, IcItemsStock
 import difflib
 import uuid
@@ -176,10 +176,10 @@ def insert_document_logic(db: Session, data: dict, source_file_id: str, appsheet
     num_lines = len(lines)
     issuer_name = issuer_data.get('cpName', 'Desconocido')
     project_info = f". Proyecto: {matched_project_id}" if matched_project_id else ""
-    doc_obj.doAIComment = f"Digitalización completa. Emisor: {issuer_name}. Líneas procesadas: {num_lines}{project_info}."
+    doc_obj.doAIComment = f"DigitalizaciÃ³n completa. Emisor: {issuer_name}. LÃ­neas procesadas: {num_lines}{project_info}."
     line_number = 1
     for line in lines:
-        manual_desc = str(line.get("description") or "Sin descripción").strip()
+        manual_desc = str(line.get("description") or "Sin descripciÃ³n").strip()
         product_hint = str(line.get("product_name") or "").strip()
         brand_hint = str(line.get("brand") or "").strip()
         model_hint = str(line.get("model") or "").strip()
@@ -268,14 +268,14 @@ def create_inventory_movements_logic(db: Session, document_id: str, database_id:
             out_id = str(uuid.uuid4()).replace('-', '')[:8].upper()
             _make_movement(db, mv_id=out_id, database_id=database_id, item_id=final_supply_id, doc_ln_id=ln.DocumentLnID,
                            mv_date=doc.doDate, action="OUT", quantity=qty, origin_id=ln.OriginID, project_id=ln.DestinationID,
-                           notes=f"{notes_base} – Traslado salida", now=now)
+                           notes=f"{notes_base} â€“ Traslado salida", now=now)
             pr_out = str(uuid.uuid4()).replace('-', '')[:8].upper()
             _make_price(db, pr_id=pr_out, database_id=database_id, item_id=final_supply_id, mv_id=out_id,
                         project_id=ln.OriginID, title="Traslado Salida", ln=ln, now=now)
             in_id = str(uuid.uuid4()).replace('-', '')[:8].upper()
             _make_movement(db, mv_id=in_id, database_id=database_id, item_id=final_supply_id, doc_ln_id=ln.DocumentLnID,
                            mv_date=doc.doDate, action="IN", quantity=qty, origin_id=ln.DestinationID, project_id=ln.DestinationID,
-                           notes=f"{notes_base} – Traslado entrada", now=now)
+                           notes=f"{notes_base} â€“ Traslado entrada", now=now)
             pr_in = str(uuid.uuid4()).replace('-', '')[:8].upper()
             _make_price(db, pr_id=pr_in, database_id=database_id, item_id=final_supply_id, mv_id=in_id,
                         project_id=ln.DestinationID, title="Traslado Entrada", ln=ln, now=now)
@@ -453,3 +453,65 @@ def create_item_from_url_logic(db: Session, data: dict, image_url: str, database
         t = threading.Thread(target=upload_scraped_image, args=(image_url, img_filename, image_folder_id, item_id), daemon=True)
         t.start()
     return {"status": "success", "action": action, "item_id": item_id, "item_title": it_title, "brand_id": brand_id, "brand_name": it_brand_name or None, "database_id": database_id}
+def process_single_movement_logic(db: Session, data: dict):
+    mv_id = data.get("movement_id")
+    db_id = data.get("database_id")
+    item_id = data.get("item_id")
+    origin_id = data.get("origin_id")
+    dest_id = data.get("project_id")
+    qty = float(data.get("qty", 0.0))
+    action = data.get("action")
+    user = data.get("created_by", "AppSheet")
+    now = get_now_ca()
+
+    def apply_stock(loc_id, is_in: bool):
+        if not loc_id: return
+        
+        # 1. Crear el registro en icItemsPrices
+        import uuid
+        pr_id = str(uuid.uuid4()).replace('-', '')[:10].upper()
+        title = "IN" if is_in else "OUT"
+        
+        new_price = IcPrice(
+            PriceID=pr_id, DatabaseID=db_id, ItemID=item_id,
+            ProjectID=loc_id, MovementID=mv_id,
+            prTitle=title, prQuantity=qty, prPrice=0, prTax=0, prTotal=0,
+            prCreatedby=user, prCreateddate=now
+        )
+        db.add(new_price)
+        
+        # 2. Actualizar la tabla consolidada icItemsStock
+        stock_id = "{}-{}".format(item_id, loc_id)
+        stock_record = db.query(IcItemsStock).filter(IcItemsStock.StockID == stock_id).first()
+        qty_change = qty if is_in else -qty
+        
+        if stock_record:
+            stock_record.stQuantity = float(stock_record.stQuantity or 0) + float(qty_change)
+            
+            # Concatenar IDs de forma segura
+            movs = str(stock_record.stMovements or "")
+            if mv_id not in movs:
+                stock_record.stMovements = "{} , {}".format(movs, mv_id) if movs else mv_id
+                
+            prices = str(stock_record.stPrices or "")
+            if pr_id not in prices:
+                stock_record.stPrices = "{} , {}".format(prices, pr_id) if prices else pr_id
+        else:
+            # Si no existe en este recinto, creamos la fila
+            new_stock = IcItemsStock(
+                StockID=stock_id, DatabaseID=db_id, ItemID=item_id, ProjectID=loc_id,
+                stQuantity=qty_change, stMovements=mv_id, stPrices=pr_id
+            )
+            db.add(new_stock)
+
+    # Evaluar la acción que manda AppSheet
+    if action == 'Transfer':
+        apply_stock(origin_id, is_in=False) # Resta del origen
+        apply_stock(dest_id, is_in=True)    # Suma al destino
+    elif action == 'IN':
+        apply_stock(dest_id, is_in=True)
+    elif action == 'OUT':
+        apply_stock(origin_id, is_in=False)
+
+    db.commit()
+    return {"status": "success", "processed_action": action, "item_id": item_id}
