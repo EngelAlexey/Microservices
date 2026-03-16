@@ -500,8 +500,8 @@ def process_single_movement_logic(db: Session, data: dict):
         PriceID=price_id, DatabaseID=db_id, ItemID=item_id,
         ProjectID=dest_id or origin_id, # Usar el que esté disponible
         MovementID=mv_id, SupplyID=supply_id,
-        prTitle=f"Bot Move: {action}",
-        prDescription=f"Processed by Microservice logic for {action}",
+        prTitle=action,
+        prDescription=f"Microservice: {action}",
         prQuantity=qty, prPrice=price, prTotal=qty*price,
         prCreatedby=user, prCreateddate=now
     )
