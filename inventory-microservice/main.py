@@ -76,10 +76,19 @@ async def process_drive_file(payload: FilePayload, db: Session = Depends(get_db)
         db_check = SessionLocal()
         try:
             doc_record = db_check.query(FnDocument).filter(FnDocument.DocumentID == payload.doc_id).first()
-            if doc_record and doc_record.DriveID:
-                file_id = doc_record.DriveID.strip()
+            if doc_record:
+                if doc_record.DriveID:
+                    file_id = doc_record.DriveID.strip()
+                    logger.info(f"Recovered DriveID from DB: {file_id}")
+                elif doc_record.doFile:
+                    file_id = doc_record.doFile.strip()
+                    logger.info(f"Recovered path from doFile in DB: {file_id}")
         finally:
             db_check.close()
+    
+    if not file_id:
+        raise HTTPException(status_code=422, detail="No se proporcionó ni se encontró DriveID o ruta de archivo.")
+
     loop = asyncio.get_event_loop()
     if '/' in file_id:
         file_id = await loop.run_in_executor(_executor, resolve_file_id, file_id)
