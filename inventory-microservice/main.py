@@ -20,7 +20,7 @@ app = FastAPI()
 _executor = ThreadPoolExecutor(max_workers=4)
 
 class FilePayload(BaseModel):
-    file_id: str
+    file_id: str | None = None
     database_id: str
     doc_id: str | None = None
     image_folder_id: str | None = None
