@@ -5,9 +5,10 @@ import sys
 # Add current dir to path
 sys.path.append(os.path.abspath('.'))
 
-from drive_services import get_drive_service, resolve_file_id
+from drive_services import get_drive_service, download_with_validation
+from ai_services import extract_invoice_data
 
-# Configure logging to be very explicit
+# Configure logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(levelname)s: %(message)s',
@@ -15,25 +16,26 @@ logging.basicConfig(
 )
 
 def run_tests():
-    print("--- STARTING TESTS ---")
+    print("--- TESTING SPECIFIC DRIVE ID ---")
+    drive_id = "1ouuXVogN-X6qCZXFljZ7Hk2v5LEnh16G"
+    print(f"Target ID: {drive_id}")
     
-    print("\n1. Checking Credentials...")
-    service = get_drive_service()
-    if service:
-        print("RESULT: Service account loaded and service built.")
-    else:
-        print("RESULT: ERROR - Service account failed to load.")
-
-    print("\n2. Testing Path Resolution...")
-    path = "B01-Bodegas Benjamín/Documents/70AD993F64.doFile.170533.pdf"
-    print(f"INPUT PATH: {path}")
-    result = resolve_file_id(path)
-    print(f"OUTPUT: {result}")
+    print("\n1. Attempting Download...")
+    content, meta = download_with_validation(drive_id)
     
-    if result == path:
-        print("RESULT: Path could NOT be resolved to an ID.")
+    if content:
+        print(f"SUCCESS: Downloaded file '{meta.get('name')}' ({len(content)} bytes)")
+        
+        print("\n2. Attempting AI Extraction...")
+        data = extract_invoice_data(content)
+        if data:
+            print("SUCCESS: AI extracted data successfully.")
+            import json
+            print(json.dumps(data.get('header', {}), indent=2))
+        else:
+            print("FAILURE: AI extraction failed (Check GEMINI_API_KEY or model name).")
     else:
-        print(f"RESULT: Successfully resolved to ID: {result}")
+        print("FAILURE: Could not download file. Check service account permissions or if file is truly public.")
 
 if __name__ == "__main__":
     run_tests()
