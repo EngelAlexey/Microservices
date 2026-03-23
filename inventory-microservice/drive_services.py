@@ -27,22 +27,24 @@ def get_drive_service(impersonate_user: str = None):
             break
             
     if not creds_file:
+        logger.error("No service account file found in any expected location.")
         return None
         
     try:
         creds = service_account.Credentials.from_service_account_file(
             creds_file, scopes=SCOPES)
+        logger.info(f"Loaded credentials from {creds_file}")
             
         if impersonate_user:
             try:
                 creds = creds.with_subject(impersonate_user)
-            except:
-                pass
+                logger.info(f"Impersonating user: {impersonate_user}")
+            except Exception as e:
+                logger.warning(f"Failed to impersonate {impersonate_user}: {str(e)}")
                 
         return build('drive', 'v3', credentials=creds, cache_discovery=False)
-    except:
-        return None
-
+    except Exception as e:
+        logger.error(f"Error building Drive service: {str(e)}")
 def resolve_file_id(file_id_or_path: str) -> str:
     if not file_id_or_path:
         return file_id_or_path
@@ -68,9 +70,12 @@ def resolve_file_id(file_id_or_path: str) -> str:
     try:
         service = get_drive_service()
         if not service:
+            logger.error(f"Unable to resolve File ID for '{file_id_or_path}': Service not available.")
             return file_id_or_path
         
         query = f"name = '{filename}' and trashed = false"
+        logger.info(f"Searching for file with name: '{filename}'")
+        
         results = service.files().list(
             q=query,
             fields="files(id, name)",
@@ -81,18 +86,44 @@ def resolve_file_id(file_id_or_path: str) -> str:
         
         files = results.get('files', [])
         if files:
-            return str(files[0]['id']).strip()
+            new_id = str(files[0]['id']).strip()
+            logger.info(f"Resolved path '{file_id_or_path}' to ID: '{new_id}'")
+            return new_id
         else:
+            logger.warning(f"No file found in Drive with name '{filename}'. Path resolution failed.")
             return file_id_or_path  
-    except:
+    except Exception as e:
+        logger.error(f"Excpetion while resolving path '{file_id_or_path}': {str(e)}")
         return file_id_or_path
 
 def download_with_validation(file_id):
     try:
+        if not file_id:
+            return None, None
+            
+        # Basic validation
+        if '/' in file_id or len(file_id) < 15:
+            logger.error(f"Invalid file_id format: '{file_id}'.")
+            return None, None
+            
         service = get_drive_service()
         if not service:
+            # Fallback for public files using API Key if service account is not available
+            api_key = os.getenv("GOOGLE_API_KEY")
+            if api_key:
+                logger.info(f"Attempting download via API Key fallback for ID: {file_id}")
+                import requests
+                url = f"https://www.googleapis.com/drive/v3/files/{file_id}?alt=media&key={api_key}"
+                response = requests.get(url)
+                if response.status_code == 200:
+                    # We don't have metadata this way easily, so we dummy it
+                    meta = {"name": "public_file.pdf", "mimeType": "application/pdf"}
+                    return response.content, meta
+                else:
+                    logger.error(f"API Key fallback failed with status {response.status_code}: {response.text}")
             return None, None
         
+        logger.info(f"Downloading file with ID: {file_id}")
         meta = service.files().get(
             fileId=file_id, 
             fields="name, mimeType",
@@ -114,6 +145,17 @@ def download_with_validation(file_id):
         return file_stream.read(), meta
     except Exception as e:
         logger.error(f"Error downloading file {file_id}: {str(e)}")
+        # If service account failed with 403/404, try API key fallback one last time
+        if "403" in str(e) or "404" in str(e):
+             api_key = os.getenv("GOOGLE_API_KEY")
+             if api_key:
+                logger.info(f"Service account failed. Retrying with API Key for ID: {file_id}")
+                import requests
+                url = f"https://www.googleapis.com/drive/v3/files/{file_id}?alt=media&key={api_key}"
+                response = requests.get(url)
+                if response.status_code == 200:
+                    meta = {"name": "public_file.pdf", "mimeType": "application/pdf"}
+                    return response.content, meta
         return None, None
 
 @functools.lru_cache(maxsize=128)

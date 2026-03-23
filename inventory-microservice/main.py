@@ -68,6 +68,7 @@ def _check_duplicate(file_id: str, database_id: str):
 
 @app.post("/webhook/process-drive-file")
 async def process_drive_file(payload: FilePayload, db: Session = Depends(get_db)):
+    logger.info(f"Received payload: {payload}")
     file_id = payload.file_id
     db_id = payload.database_id
     original_path = file_id
