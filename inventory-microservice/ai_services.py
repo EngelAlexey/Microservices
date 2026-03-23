@@ -75,7 +75,7 @@ Return JSON:
 def extract_invoice_data(pdf_content_bytes):
     try:
         response = _client.models.generate_content(
-            model='gemini-2.0-flash',
+            model='gemini-2.5-flash',
             contents=[
                 types.Part.from_bytes(data=pdf_content_bytes, mime_type="application/pdf"),
                 _PROMPT
@@ -122,7 +122,7 @@ Return JSON format:
 def extract_company_data(pdf_content_bytes):
     try:
         response = _client.models.generate_content(
-            model='gemini-2.0-flash',
+            model='gemini-2.5-flash',
             contents=[
                 types.Part.from_bytes(data=pdf_content_bytes, mime_type="application/pdf"),
                 _COMPANY_PROMPT
@@ -174,7 +174,7 @@ def extract_product_from_html(html_text: str):
     try:
         trimmed_html = html_text[:50000]
         response = _client.models.generate_content(
-            model='gemini-2.0-flash',
+            model='gemini-2.5-flash',
             contents=[trimmed_html, _PRODUCT_URL_PROMPT],
             config=types.GenerateContentConfig(
                 response_mime_type="application/json",
