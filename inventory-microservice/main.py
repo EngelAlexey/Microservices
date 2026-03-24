@@ -71,32 +71,51 @@ async def process_drive_file(payload: FilePayload, db: Session = Depends(get_db)
     logger.info(f"Received payload: {payload}")
     file_id = payload.file_id
     db_id = payload.database_id
+    # Normalize database id
+    database_id = (db_id or "")[:10]
+    
+    # Save the original path/id for later use in database record 'doFile'
     original_path = file_id
     
-    # DriveID must be present in the payload
+    # 1. Prioritize looking up by doc_id (DocumentID) in the database
+    if payload.doc_id:
+        db_doc = db.query(FnDocument).filter(
+            FnDocument.DocumentID == payload.doc_id,
+            FnDocument.DatabaseID == database_id
+        ).first()
+        if db_doc and db_doc.DriveID:
+            logger.info(f"Resolved DriveID from database record using DocID: {payload.doc_id}")
+            file_id = db_doc.DriveID
+    
+    # DriveID must be present at this point
     if not file_id:
-        logger.error(f"Missing DriveID for DocID: {payload.doc_id} in Database: {payload.database_id}")
+        logger.error(f"Missing DriveID for DocID: {payload.doc_id} in Database: {database_id}")
         raise HTTPException(
             status_code=422, 
             detail=f"DriveID (file_id) is null. Verify the source of digitalization (fnDocuments vs utEmailsAtt) for DocID: {payload.doc_id}"
         )
 
     loop = asyncio.get_event_loop()
+    # 2. If it's a path or URL, resolve it to an ID (if not already resolved by DB lookup)
     if '/' in file_id:
         file_id = await loop.run_in_executor(_executor, resolve_file_id, file_id)
-    exists = await loop.run_in_executor(_executor, _check_duplicate, file_id, db_id)
+        
+    exists = await loop.run_in_executor(_executor, _check_duplicate, file_id, database_id)
     if exists:
         return {"status": "skipped", "reason": "Expediente ya digitalizado", "document_id": exists.DocumentID}
+        
     content, meta = await loop.run_in_executor(_executor, download_with_validation, file_id)
     if not content:
         raise HTTPException(status_code=404, detail="Archivo no accesible")
+        
     data = extract_invoice_data(content)
     if not data:
         raise HTTPException(status_code=422, detail="Fallo extracción IA")
     try:
+        # Use database_id normalized, not the one from payload raw
         result = insert_document_logic(
             db, data, source_file_id=original_path, appsheet_doc_id=payload.doc_id, 
-            database_id=payload.database_id, drive_id=file_id
+            database_id=database_id, drive_id=file_id
         )
         return {"status": "success", "data": result}
     except Exception as e:
