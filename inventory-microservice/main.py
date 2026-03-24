@@ -20,7 +20,7 @@ app = FastAPI()
 _executor = ThreadPoolExecutor(max_workers=4)
 
 class FilePayload(BaseModel):
-    file_id: str
+    file_id: str | None = None
     database_id: str
     doc_id: str | None = None
     image_folder_id: str | None = None
@@ -75,7 +75,11 @@ async def process_drive_file(payload: FilePayload, db: Session = Depends(get_db)
     
     # DriveID must be present in the payload
     if not file_id:
-        raise HTTPException(status_code=422, detail="DriveID is required.")
+        logger.error(f"Missing DriveID for DocID: {payload.doc_id} in Database: {payload.database_id}")
+        raise HTTPException(
+            status_code=422, 
+            detail=f"DriveID (file_id) is null. Verify the source of digitalization (fnDocuments vs utEmailsAtt) for DocID: {payload.doc_id}"
+        )
 
     loop = asyncio.get_event_loop()
     if '/' in file_id:
