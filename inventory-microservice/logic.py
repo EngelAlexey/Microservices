@@ -484,6 +484,10 @@ def process_single_movement_logic(db: Session, data: dict):
     price = float(data.get("price", 0.0))
     supply_id = str(data.get("supply_id", "")).strip() if data.get("supply_id") else None
     action = str(data.get("action", "")).strip()
+    if action == "Salida":
+        action = "OUT"
+    elif action == "Ingreso" or action == "Entrada":
+        action = "IN"
     user = str(data.get("created_by", "AI_BOT")).strip()
     now = get_now_ca()
 
