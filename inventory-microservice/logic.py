@@ -18,8 +18,8 @@ def safe_float(val):
     if isinstance(val, (int, float)):
         return float(val)
     
-    # Convierte a string y limpia los símbolos de moneda y comas
-    cleaned = str(val).replace(',', '').replace('₡', '').replace('¢', '').replace('C', '').replace('c', '').replace('$', '').strip()
+    # Limpiamos letras, símbolos, comas Y espacios en blanco
+    cleaned = str(val).replace(',', '').replace('₡', '').replace('¢', '').replace('C', '').replace('c', '').replace('$', '').replace(' ', '').strip()
     try:
         return float(cleaned)
     except ValueError:
@@ -137,12 +137,17 @@ def find_project_id(address_text: str, project_choices: dict):
 
 def insert_document_logic(db: Session, data: dict, source_file_id: str, appsheet_doc_id: str = None, database_id: str = None, drive_id: str = None):
     database_id = (database_id or "")[:10]
-    header = data.get("header", {})
-    lines = data.get("lines", [])
+    
+    # Blindaje contra "null" (None) de la IA
+    header = data.get("header") or {}
+    lines = data.get("lines") or []
+    
     sku_map, choices_map, parent_map, variant_map = _load_product_catalog(db, database_id)
     project_choices = _load_project_catalog(db, database_id)
-    issuer_data = header.get("issuer", {})
-    receptor_data = header.get("receptor", {})
+    
+    # Blindaje contra "null" (None) dentro del header
+    issuer_data = header.get("issuer") or {}
+    receptor_data = header.get("receptor") or {}
     issuer_id = header.get("doIssuerID")
     receptor_id = header.get("doReceptorID")
     if issuer_data and any(issuer_data.values()):
