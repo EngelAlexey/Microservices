@@ -12,6 +12,19 @@ import threading
 
 logger = logging.getLogger(__name__)
 
+def safe_float(val):
+    if val is None or val == "":
+        return 0.0
+    if isinstance(val, (int, float)):
+        return float(val)
+    
+    # Convierte a string y limpia los símbolos de moneda y comas
+    cleaned = str(val).replace(',', '').replace('₡', '').replace('¢', '').replace('C', '').replace('c', '').replace('$', '').strip()
+    try:
+        return float(cleaned)
+    except ValueError:
+        return 0.0
+
 def get_now_ca():
     return datetime.now(timezone(timedelta(hours=-6))).replace(tzinfo=None)
 
@@ -168,9 +181,9 @@ def insert_document_logic(db: Session, data: dict, source_file_id: str, appsheet
     doc_obj.doAccount = header.get("doAccount")
     doc_obj.doCredit = header.get("doCredit")
     doc_obj.CurrencyID = header.get("CurrencyID", "CRC")
-    doc_obj.doSubtotal = header.get("SubtotalAmount", 0.0)
-    doc_obj.doTaxes = header.get("TaxAmount", 0.0)
-    doc_obj.doTotal = header.get("TotalAmount", 0.0)
+    doc_obj.doSubtotal = safe_float(header.get("SubtotalAmount", 0.0))
+    doc_obj.doTaxes = safe_float(header.get("TaxAmount", 0.0))
+    doc_obj.doTotal = safe_float(header.get("TotalAmount", 0.0))
     doc_obj.doFile = source_file_id
     doc_obj.DriveID = str(drive_id or source_file_id).strip()
     num_lines = len(lines)
@@ -184,12 +197,14 @@ def insert_document_logic(db: Session, data: dict, source_file_id: str, appsheet
         brand_hint = str(line.get("brand") or "").strip()
         model_hint = str(line.get("model") or "").strip()
         supply_id, match_source, candidate = find_product_id(manual_desc, choices_map, product_hint, brand_hint, model_hint)
-        qty = float(line.get("quantity", 0))
-        price_unit = float(line.get("unit_price", 0))
-        discount_ln = float(line.get("discount_amount", 0))
-        subtotal_ln = float(line.get("subtotal_line", 0) or ((qty * price_unit) - discount_ln))
-        tax_ln = float(line.get("tax_amount", 0))
-        total_ln = float(line.get("total_line", 0) or (subtotal_ln + tax_ln))
+        qty = safe_float(line.get("quantity", 0))
+        price_unit = safe_float(line.get("unit_price", 0))
+        discount_ln = safe_float(line.get("discount_amount", 0))
+        subtotal_raw = safe_float(line.get("subtotal_line", 0))
+        subtotal_ln = subtotal_raw if subtotal_raw else ((qty * price_unit) - discount_ln)
+        tax_ln = safe_float(line.get("tax_amount", 0))
+        total_raw = safe_float(line.get("total_line", 0))
+        total_ln = total_raw if total_raw else (subtotal_ln + tax_ln)
         ln_uuid = str(uuid.uuid4()).replace('-', '')[:8].upper()
         obs_parts = []
         if supply_id == "UNKNOWN":
