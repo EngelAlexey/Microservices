@@ -74,24 +74,33 @@ def resolve_file_id(file_id_or_path: str) -> str:
             return file_id_or_path
         
         query = f"name = '{filename}' and trashed = false"
-        logger.info(f"Searching for file with name: '{filename}'")
+        max_retries = 3
+        base_delay = 2
         
-        results = service.files().list(
-            q=query,
-            fields="files(id, name)",
-            supportsAllDrives=True,
-            includeItemsFromAllDrives=True,
-            pageSize=5
-        ).execute()
-        
-        files = results.get('files', [])
-        if files:
-            new_id = str(files[0]['id']).strip()
-            logger.info(f"Resolved path '{file_id_or_path}' to ID: '{new_id}'")
-            return new_id
-        else:
-            logger.warning(f"No file found in Drive with name '{filename}'. Path resolution failed.")
-            return file_id_or_path  
+        for attempt in range(max_retries):
+            logger.info(f"Searching for file with name: '{filename}' (Attempt {attempt+1}/{max_retries})")
+            
+            results = service.files().list(
+                q=query,
+                fields="files(id, name)",
+                supportsAllDrives=True,
+                includeItemsFromAllDrives=True,
+                pageSize=5
+            ).execute()
+            
+            files = results.get('files', [])
+            if files:
+                new_id = str(files[0]['id']).strip()
+                logger.info(f"Resolved path '{file_id_or_path}' to ID: '{new_id}'")
+                return new_id
+                
+            if attempt < max_retries - 1:
+                delay = base_delay * (2 ** attempt)
+                logger.warning(f"No file found in Drive with name '{filename}' yet. Retrying in {delay}s...")
+                time.sleep(delay)
+                
+        logger.warning(f"No file found in Drive with name '{filename}'. Path resolution failed after retries.")
+        return file_id_or_path  
     except Exception as e:
         logger.error(f"Excpetion while resolving path '{file_id_or_path}': {str(e)}")
         return file_id_or_path
