@@ -253,19 +253,56 @@ def _make_movement(db: Session, *, mv_id: str, database_id: str, item_id: str,
     db.add(m)
     return m
 
-def _make_price(db: Session, *, pr_id: str, database_id: str, item_id: str,
-                mv_id: str, project_id: str, title: str, ln, now):
-    p = IcPrice(
-        PriceID=pr_id, DatabaseID=database_id, ItemID=(item_id or "")[:10],
-        MovementID=mv_id, ProjectID=(project_id or "")[:10] or None,
-        prTitle=title, prDescription=(ln.dlDescription or "")[:255],
-        prQuantity=ln.dlQuantity, prPrice=ln.dlUnitPrice, prTax=ln.dlTaxes,
-        prTotal=ln.dlTotal, prCreatedby="AI_BOT", prCreateddate=now,
-        prModifiedby="AI_BOT", prModifieddate=now,
-    )
-    db.add(p)
-    return p
+def apply_valuation_bucket_logic(db: Session, db_id: str, item_id: str, loc_id: str, q_delta: float, 
+                                 row_action: str, mv_id: str, supply_id: str, price: float, user: str, now):
+    """ icItemsPrices: Replicando logica de AppSheet (ISBLANK / TOP 1 FILTER LIST) """
+    if not loc_id: return
+    loc_id = str(loc_id).strip()
+    
+    inward_titles = ["IN", "Reserved IN", "Transfer", "Reserved Transfer"]
+    outward_titles = ["OUT", "Reserved OUT"]
 
+    is_outward = row_action in outward_titles
+
+    if is_outward:
+        # Se resta por el tipo (Busca el TOP 1 origin "IN" y resta)
+        rec_in = db.query(IcPrice).filter(
+            IcPrice.ItemID == item_id,
+            IcPrice.ProjectID == loc_id,
+            IcPrice.prTitle.in_(inward_titles),
+            IcPrice.isDeleted == False
+        ).first()
+        if rec_in:
+            rec_in.prQuantity = float(rec_in.prQuantity or 0) - float(q_delta)
+            rec_in.prTotal = float(rec_in.prQuantity) * float(rec_in.prPrice or price)
+            rec_in.prModifiedby = user
+            rec_in.prModifieddate = now
+
+    # ISBLANK / TOP 1 para sumar o crear fila de la action respectiva
+    search_list = outward_titles if is_outward else inward_titles
+    
+    rec_bucket = db.query(IcPrice).filter(
+        IcPrice.ItemID == item_id,
+        IcPrice.ProjectID == loc_id,
+        IcPrice.prTitle.in_(search_list),
+        IcPrice.isDeleted == False
+    ).first()
+
+    if rec_bucket:
+        rec_bucket.prQuantity = float(rec_bucket.prQuantity or 0) + float(q_delta)
+        rec_bucket.prTotal = float(rec_bucket.prQuantity) * float(rec_bucket.prPrice or price)
+        rec_bucket.prModifiedby = user
+        rec_bucket.prModifieddate = now
+    else:
+        db.add(IcPrice(
+            PriceID=str(uuid.uuid4()).replace('-', '')[:10].upper(),
+            DatabaseID=db_id, ItemID=(item_id or "")[:10], ProjectID=(loc_id or "")[:10] or None,
+            MovementID=mv_id, SupplyID=supply_id,
+            prTitle=row_action, prDescription=f"Micro: {row_action}",
+            prQuantity=q_delta, prPrice=price, prTotal=float(q_delta)*float(price),
+            prCreatedby=user, prCreateddate=now,
+            prModifiedby=user, prModifieddate=now, isDeleted=False
+        ))
 def create_inventory_movements_logic(db: Session, document_id: str, database_id: str,
                                      image_folder_id: str = None, project_id: str = None):
     doc = db.query(FnDocument).filter(FnDocument.DocumentID == document_id).first()
@@ -314,9 +351,13 @@ def create_inventory_movements_logic(db: Session, document_id: str, database_id:
             _make_movement(db, mv_id=mv_id, database_id=database_id, item_id=final_supply_id, doc_ln_id=ln.DocumentLnID,
                            mv_date=doc.doDate, action=action, quantity=qty, origin_id=origin, project_id=dest,
                            notes=notes_base, now=now)
-            pr_id = str(uuid.uuid4()).replace('-', '')[:8].upper()
-            _make_price(db, pr_id=pr_id, database_id=database_id, item_id=final_supply_id, mv_id=mv_id,
-                        project_id=dest, title="Ingreso" if action == "IN" else "Salida", ln=ln, now=now)
+            action_eval = "IN" if action == "IN" else "OUT"
+            loc_val = dest if action == "IN" else origin
+            apply_valuation_bucket_logic(
+                db=db, db_id=database_id, item_id=final_supply_id, loc_id=loc_val,
+                q_delta=qty, row_action=action_eval, mv_id=mv_id,
+                supply_id=ln.SupplyID, price=ln.dlUnitPrice, user="AI_BOT", now=now
+            )
             variant = db.query(BcItemLn).filter(BcItemLn.ItemLnID == final_supply_id).first()
             if variant:
                 delta = qty if action == "IN" else -qty
@@ -484,10 +525,6 @@ def process_single_movement_logic(db: Session, data: dict):
     price = float(data.get("price", 0.0))
     supply_id = str(data.get("supply_id", "")).strip() if data.get("supply_id") else None
     action = str(data.get("action", "")).strip()
-    if action == "Salida":
-        action = "OUT"
-    elif action == "Ingreso" or action == "Entrada":
-        action = "IN"
     user = str(data.get("created_by", "AI_BOT")).strip()
     now = get_now_ca()
 
@@ -514,55 +551,6 @@ def process_single_movement_logic(db: Session, data: dict):
     mv_obj.mvCreateddate = now if not mv_obj.mvCreateddate else mv_obj.mvCreateddate
 
     # --- HELPERS ---
-    def update_valuation(loc_id, q_delta, row_action):
-        """ icItemsPrices: Agrupa por Ingreso/Salida y resta del origen al hacer salidas """
-        if not loc_id: return
-        loc_id = loc_id.strip()
-        
-        # 1. Restar del bucket de Ingreso si es una salida
-        if row_action in ["Salida", "Transfer-Origin"]:
-            rec_in = None
-            for title in ["Ingreso", "IN", "Transfer"]:
-                rec_in = db.query(IcPrice).filter(
-                    IcPrice.ItemID == item_id,
-                    IcPrice.ProjectID == loc_id,
-                    IcPrice.prTitle.like(f"{title}%"),
-                    IcPrice.isDeleted == False
-                ).order_by(IcPrice.prQuantity.desc()).first()
-                if rec_in: break
-            
-            if rec_in:
-                rec_in.prQuantity = float(rec_in.prQuantity or 0) - float(q_delta)
-                rec_in.prTotal = float(rec_in.prQuantity) * float(rec_in.prPrice or price)
-                rec_in.prModifiedby = user
-                rec_in.prModifieddate = now
-
-        # 2. Sumar o crear en el bucket correspondiente a la acción actual
-        actual_title = "Salida" if row_action == "Transfer-Origin" else row_action
-        
-        rec_action = db.query(IcPrice).filter(
-            IcPrice.ItemID == item_id,
-            IcPrice.ProjectID == loc_id,
-            IcPrice.prTitle == actual_title,
-            IcPrice.isDeleted == False
-        ).first()
-
-        if rec_action:
-            rec_action.prQuantity = float(rec_action.prQuantity or 0) + float(q_delta)
-            rec_action.prTotal = float(rec_action.prQuantity) * float(rec_action.prPrice or price)
-            rec_action.prModifiedby = user
-            rec_action.prModifieddate = now
-        else:
-            db.add(IcPrice(
-                PriceID=str(uuid.uuid4()).replace('-', '')[:10].upper(),
-                DatabaseID=db_id, ItemID=item_id, ProjectID=loc_id,
-                MovementID=mv_id, SupplyID=supply_id,
-                prTitle=actual_title, prDescription=f"Micro: {action}",
-                prQuantity=q_delta, prPrice=price, prTotal=q_delta*price,
-                prCreatedby=user, prCreateddate=now,
-                prModifiedby=user, prModifieddate=now, isDeleted=False
-            ))
-
     def update_net_stock(loc_id, q_delta):
         """ icItemsStock: Consolidate to 1 row per Project/Item (Net Total) """
         if not loc_id: return
@@ -598,18 +586,22 @@ def process_single_movement_logic(db: Session, data: dict):
             variant.lnModifiedAt = now
 
     # --- EXECUTION FLOW ---
-    if action == 'Transfer':
-        update_valuation(origin_id, qty, "Transfer-Origin")
+    if action in ['Transfer', 'Reserved Transfer']:
+        out_action = "OUT" if action == "Transfer" else "Reserved OUT"
+        apply_valuation_bucket_logic(db, db_id, item_id, origin_id, qty, out_action, mv_id, supply_id, price, user, now)
         update_net_stock(origin_id, -qty)
-        update_valuation(dest_id, qty, "Transfer")
+        
+        apply_valuation_bucket_logic(db, db_id, item_id, dest_id, qty, action, mv_id, supply_id, price, user, now)
         update_net_stock(dest_id, qty)
         update_global(0) # Touch bcItemsLns to trigger AppSheet sync
-    elif action == 'IN':
-        update_valuation(dest_id, qty, "Ingreso")
+        
+    elif action in ['IN', 'Reserved IN']:
+        apply_valuation_bucket_logic(db, db_id, item_id, dest_id, qty, action, mv_id, supply_id, price, user, now)
         update_net_stock(dest_id, qty)
         update_global(qty)
-    elif action == 'OUT':
-        update_valuation(origin_id, qty, "Salida")
+        
+    elif action in ['OUT', 'Reserved OUT']:
+        apply_valuation_bucket_logic(db, db_id, item_id, origin_id, qty, action, mv_id, supply_id, price, user, now)
         update_net_stock(origin_id, -qty)
         update_global(-qty)
 
