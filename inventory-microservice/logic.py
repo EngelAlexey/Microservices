@@ -515,44 +515,49 @@ def process_single_movement_logic(db: Session, data: dict):
 
     # --- HELPERS ---
     def update_valuation(loc_id, q_delta, row_action):
-        """ icItemsPrices: Agrupa por Ingreso/Salida, o resta directamente si es Transfer-Origin """
+        """ icItemsPrices: Agrupa por Ingreso/Salida y resta del origen al hacer salidas """
         if not loc_id: return
         loc_id = loc_id.strip()
         
-        # Determine lookup logic
-        if row_action == "Transfer-Origin" or row_action == "Ingreso" or row_action == "Salida":
-            search_titles = ["Ingreso", "IN", "Transfer"] # All potential stock buckets
-        else:
-            search_titles = [row_action]
-        
-        # Try to find existing record
-        rec = None
-        for title in search_titles:
-            rec = db.query(IcPrice).filter(
-                IcPrice.ItemID == item_id,
-                IcPrice.ProjectID == loc_id,
-                IcPrice.prTitle.like(f"{title}%"),
-                IcPrice.isDeleted == False
-            ).order_by(IcPrice.prQuantity.desc()).first()
-            if rec: break
-        
-        if rec:
-            if row_action == "Transfer-Origin":
-                rec.prQuantity = float(rec.prQuantity or 0) - float(q_delta)
-            else:
-                rec.prQuantity = float(rec.prQuantity or 0) + float(q_delta)
+        # 1. Restar del bucket de Ingreso si es una salida
+        if row_action in ["Salida", "Transfer-Origin"]:
+            rec_in = None
+            for title in ["Ingreso", "IN", "Transfer"]:
+                rec_in = db.query(IcPrice).filter(
+                    IcPrice.ItemID == item_id,
+                    IcPrice.ProjectID == loc_id,
+                    IcPrice.prTitle.like(f"{title}%"),
+                    IcPrice.isDeleted == False
+                ).order_by(IcPrice.prQuantity.desc()).first()
+                if rec_in: break
             
-            rec.prTotal = float(rec.prQuantity) * float(rec.prPrice or price)
-            rec.prModifiedby = user
-            rec.prModifieddate = now
+            if rec_in:
+                rec_in.prQuantity = float(rec_in.prQuantity or 0) - float(q_delta)
+                rec_in.prTotal = float(rec_in.prQuantity) * float(rec_in.prPrice or price)
+                rec_in.prModifiedby = user
+                rec_in.prModifieddate = now
+
+        # 2. Sumar o crear en el bucket correspondiente a la acción actual
+        actual_title = "Salida" if row_action == "Transfer-Origin" else row_action
+        
+        rec_action = db.query(IcPrice).filter(
+            IcPrice.ItemID == item_id,
+            IcPrice.ProjectID == loc_id,
+            IcPrice.prTitle == actual_title,
+            IcPrice.isDeleted == False
+        ).first()
+
+        if rec_action:
+            rec_action.prQuantity = float(rec_action.prQuantity or 0) + float(q_delta)
+            rec_action.prTotal = float(rec_action.prQuantity) * float(rec_action.prPrice or price)
+            rec_action.prModifiedby = user
+            rec_action.prModifieddate = now
         else:
-            # Crea uno nuevo
-            new_title = "Salida" if row_action == "Transfer-Origin" else row_action
             db.add(IcPrice(
                 PriceID=str(uuid.uuid4()).replace('-', '')[:10].upper(),
                 DatabaseID=db_id, ItemID=item_id, ProjectID=loc_id,
                 MovementID=mv_id, SupplyID=supply_id,
-                prTitle=new_title, prDescription=f"Micro: {action}",
+                prTitle=actual_title, prDescription=f"Micro: {action}",
                 prQuantity=q_delta, prPrice=price, prTotal=q_delta*price,
                 prCreatedby=user, prCreateddate=now,
                 prModifiedby=user, prModifieddate=now, isDeleted=False
