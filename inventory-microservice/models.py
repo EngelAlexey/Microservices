@@ -128,6 +128,8 @@ class IcMovement(Base):
     mvNotes = Column(Text)
     mvCreatedby = Column(String(10), default="AI_BOT")
     mvCreateddate = Column(DateTime, default=datetime.datetime.now)
+    mvModifiedby = Column(String(10), default="AI_BOT")
+    mvModifieddate = Column(DateTime, default=datetime.datetime.now)
 
 class IcPrice(Base):
     __tablename__ = "icItemsPrices"
@@ -146,8 +148,8 @@ class IcPrice(Base):
     prTotal = Column(DECIMAL(13, 2))
     prCreatedby = Column(String(10), default="AI_BOT")
     prCreateddate = Column(DateTime, default=datetime.datetime.now)
-    prModifiedby = Column(String(10))
-    prModifieddate = Column(DateTime)
+    prModifiedby = Column(String(10), default="AI_BOT")
+    prModifieddate = Column(DateTime, default=datetime.datetime.now)
 
 class DrProject(Base):
     __tablename__ = "drProjects"

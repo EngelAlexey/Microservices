@@ -259,9 +259,10 @@ def _make_movement(db: Session, *, mv_id: str, database_id: str, item_id: str,
     m = IcMovement(
         MovementID=mv_id, DatabaseID=database_id, OriginID=(origin_id or "")[:10] or None,
         ProjectID=(project_id or "")[:10] or None, ItemID=(item_id or "")[:10],
-        DocumentLnID=doc_ln_id, mvDate=mv_date or now, mvAction=action,
-        mvQuantity=quantity, mvStatus="POSTED", mvNotes=notes,
+        DocumentLnID=doc_ln_id, mvDate=now, # Always use current time for inventory status
+        mvAction=action, mvQuantity=quantity, mvStatus="POSTED", mvNotes=notes,
         mvCreatedby="AI_BOT", mvCreateddate=now,
+        mvModifiedby="AI_BOT", mvModifieddate=now
     )
     db.add(m)
     return m
@@ -340,16 +341,16 @@ def create_inventory_movements_logic(db: Session, document_id: str, database_id:
 
         if ln.OriginID and ln.DestinationID:
             out_id = str(uuid.uuid4()).replace('-', '')[:8].upper()
-            # OUT from Origin
+            # OUT from Origin to Destination
             _make_movement(db, mv_id=out_id, database_id=database_id, item_id=final_supply_id, doc_ln_id=ln.DocumentLnID,
-                           mv_date=doc.doDate, action="OUT", quantity=qty, origin_id=ln.DestinationID, project_id=ln.OriginID,
+                           mv_date=doc.doDate, action="OUT", quantity=qty, origin_id=ln.OriginID, project_id=ln.DestinationID,
                            notes=f"{notes_base} – Traslado salida", now=now)
             pr_out = str(uuid.uuid4()).replace('-', '')[:8].upper()
             _make_price(db, pr_id=pr_out, database_id=database_id, item_id=final_supply_id, mv_id=out_id,
                         project_id=ln.OriginID, title="Traslado Salida", ln=ln, now=now)
             
             in_id = str(uuid.uuid4()).replace('-', '')[:8].upper()
-            # IN to Destination
+            # IN to Destination from Origin
             _make_movement(db, mv_id=in_id, database_id=database_id, item_id=final_supply_id, doc_ln_id=ln.DocumentLnID,
                            mv_date=doc.doDate, action="IN", quantity=qty, origin_id=ln.OriginID, project_id=ln.DestinationID,
                            notes=f"{notes_base} – Traslado entrada", now=now)
@@ -360,23 +361,24 @@ def create_inventory_movements_logic(db: Session, document_id: str, database_id:
         else:
             mv_id = str(uuid.uuid4()).replace('-', '')[:8].upper()
             
-            # Recinto logic: No fallback to IssuerID/ReceptorID
-            # The 'ProjectID' column in IcMovement is the Facility (Recinto)
+            # Recinto logic: Semantic mapping
+            # OUT -> Origin, IN -> Project (Destino)
             if action == "OUT":
-                loc_val = (ln.OriginID or project_id or "")[:10] or None
-                origin_id_val = None # We don't use company IDs here
+                origin_val = (project_id or "")[:10] or None
+                dest_val = None
+                loc_eval = origin_val
             else:
-                loc_val = (ln.DestinationID or project_id or "")[:10] or None
-                origin_id_val = None
+                origin_val = None
+                dest_val = (project_id or "")[:10] or None
+                loc_eval = dest_val
                 
             _make_movement(db, mv_id=mv_id, database_id=database_id, item_id=final_supply_id, doc_ln_id=ln.DocumentLnID,
-                           mv_date=doc.doDate, action=action, quantity=qty, origin_id=origin_id_val, project_id=loc_val,
+                           mv_date=doc.doDate, action=action, quantity=qty, origin_id=origin_val, project_id=dest_val,
                            notes=notes_base, now=now)
             
-            action_eval = "IN" if action == "IN" else "OUT"
             apply_valuation_bucket_logic(
-                db=db, db_id=database_id, item_id=final_supply_id, loc_id=loc_val,
-                q_delta=qty, row_action=action_eval, mv_id=mv_id,
+                db=db, db_id=database_id, item_id=final_supply_id, loc_id=loc_eval,
+                q_delta=qty, row_action=action, mv_id=mv_id,
                 supply_id=ln.SupplyID, price=ln.dlUnitPrice, user="AI_BOT", now=now
             )
             variant = db.query(BcItemLn).filter(BcItemLn.ItemLnID == final_supply_id).first()
