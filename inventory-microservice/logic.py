@@ -235,9 +235,22 @@ def insert_document_logic(db: Session, data: dict, source_file_id: str, appsheet
     db.commit()
     return {"status": "success", "document_id": doc_obj.DocumentID}
 
-def _determine_action(doc_account: str) -> str:
-    if (doc_account or "").upper() == "CXC":
-        return "OUT"
+def _determine_action(doc_account: str, doc_type: str) -> str:
+    acc = (doc_account or "").upper()
+    dtype = (doc_type or "").upper()
+    
+    if acc == "CXC":
+        # Sale
+        if dtype == "NC":
+            return "IN"  # Customer return
+        return "OUT"     # Standard sale
+    
+    if acc == "CXP":
+        # Purchase
+        if dtype == "NC":
+            return "OUT" # Return to supplier
+        return "IN"      # Standard purchase
+        
     return "IN"
 
 def _make_movement(db: Session, *, mv_id: str, database_id: str, item_id: str,
@@ -308,7 +321,7 @@ def create_inventory_movements_logic(db: Session, document_id: str, database_id:
     doc = db.query(FnDocument).filter(FnDocument.DocumentID == document_id).first()
     if not doc:
         return {"error": "Documento no encontrado"}
-    base_action = _determine_action(doc.doAccount)
+    
     sku_map, choices_map, parent_map, variant_map = _load_product_catalog(db, database_id)
     lines = db.query(FnDocumentLn).filter(FnDocumentLn.DocumentID == document_id).all()
     created_count = 0
@@ -321,38 +334,46 @@ def create_inventory_movements_logic(db: Session, document_id: str, database_id:
         now = get_now_ca()
         qty = float(ln.dlQuantity or 0)
         notes_base = f"Doc {doc.doConsecutive or document_id}"
+        
+        # Determine basic action
+        action = _determine_action(doc.doAccount, doc.doType)
+
         if ln.OriginID and ln.DestinationID:
             out_id = str(uuid.uuid4()).replace('-', '')[:8].upper()
+            # OUT from Origin
             _make_movement(db, mv_id=out_id, database_id=database_id, item_id=final_supply_id, doc_ln_id=ln.DocumentLnID,
-                           mv_date=doc.doDate, action="OUT", quantity=qty, origin_id=ln.OriginID, project_id=ln.DestinationID,
+                           mv_date=doc.doDate, action="OUT", quantity=qty, origin_id=ln.DestinationID, project_id=ln.OriginID,
                            notes=f"{notes_base} – Traslado salida", now=now)
             pr_out = str(uuid.uuid4()).replace('-', '')[:8].upper()
             _make_price(db, pr_id=pr_out, database_id=database_id, item_id=final_supply_id, mv_id=out_id,
                         project_id=ln.OriginID, title="Traslado Salida", ln=ln, now=now)
+            
             in_id = str(uuid.uuid4()).replace('-', '')[:8].upper()
+            # IN to Destination
             _make_movement(db, mv_id=in_id, database_id=database_id, item_id=final_supply_id, doc_ln_id=ln.DocumentLnID,
-                           mv_date=doc.doDate, action="IN", quantity=qty, origin_id=ln.DestinationID, project_id=ln.DestinationID,
+                           mv_date=doc.doDate, action="IN", quantity=qty, origin_id=ln.OriginID, project_id=ln.DestinationID,
                            notes=f"{notes_base} – Traslado entrada", now=now)
             pr_in = str(uuid.uuid4()).replace('-', '')[:8].upper()
             _make_price(db, pr_id=pr_in, database_id=database_id, item_id=final_supply_id, mv_id=in_id,
                         project_id=ln.DestinationID, title="Traslado Entrada", ln=ln, now=now)
             created_count += 2
         else:
-            action = base_action
             mv_id = str(uuid.uuid4()).replace('-', '')[:8].upper()
             
+            # Recinto logic: No fallback to IssuerID/ReceptorID
+            # The 'ProjectID' column in IcMovement is the Facility (Recinto)
             if action == "OUT":
-                origin = (ln.OriginID or doc.IssuerID or "")[:10] or None
-                dest = (ln.DestinationID or project_id or "")[:10] or None
+                loc_val = (ln.OriginID or project_id or "")[:10] or None
+                origin_id_val = None # We don't use company IDs here
             else:
-                origin = (ln.DestinationID or doc.IssuerID or "")[:10] or None
-                dest = (ln.OriginID or project_id or "")[:10] or None
+                loc_val = (ln.DestinationID or project_id or "")[:10] or None
+                origin_id_val = None
                 
             _make_movement(db, mv_id=mv_id, database_id=database_id, item_id=final_supply_id, doc_ln_id=ln.DocumentLnID,
-                           mv_date=doc.doDate, action=action, quantity=qty, origin_id=origin, project_id=dest,
+                           mv_date=doc.doDate, action=action, quantity=qty, origin_id=origin_id_val, project_id=loc_val,
                            notes=notes_base, now=now)
+            
             action_eval = "IN" if action == "IN" else "OUT"
-            loc_val = dest if action == "IN" else origin
             apply_valuation_bucket_logic(
                 db=db, db_id=database_id, item_id=final_supply_id, loc_id=loc_val,
                 q_delta=qty, row_action=action_eval, mv_id=mv_id,
