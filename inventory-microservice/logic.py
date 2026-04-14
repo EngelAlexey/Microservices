@@ -342,21 +342,17 @@ def create_inventory_movements_logic(db: Session, document_id: str, database_id:
         if ln.OriginID and ln.DestinationID:
             out_id = str(uuid.uuid4()).replace('-', '')[:8].upper()
             # OUT from Origin to Destination
-            _make_movement(db, mv_id=out_id, database_id=database_id, item_id=final_supply_id, doc_ln_id=ln.DocumentLnID,
+            m_out = _make_movement(db, mv_id=out_id, database_id=database_id, item_id=final_supply_id, doc_ln_id=ln.DocumentLnID,
                            mv_date=doc.doDate, action="OUT", quantity=qty, origin_id=ln.OriginID, project_id=ln.DestinationID,
                            notes=f"{notes_base} – Traslado salida", now=now)
-            pr_out = str(uuid.uuid4()).replace('-', '')[:8].upper()
-            _make_price(db, pr_id=pr_out, database_id=database_id, item_id=final_supply_id, mv_id=out_id,
-                        project_id=ln.OriginID, title="Traslado Salida", ln=ln, now=now)
+            _perform_inventory_update(db, m_out, database_id, final_supply_id, ln.SupplyID, ln.dlUnitPrice, "AI_BOT", now)
             
             in_id = str(uuid.uuid4()).replace('-', '')[:8].upper()
             # IN to Destination from Origin
-            _make_movement(db, mv_id=in_id, database_id=database_id, item_id=final_supply_id, doc_ln_id=ln.DocumentLnID,
+            m_in = _make_movement(db, mv_id=in_id, database_id=database_id, item_id=final_supply_id, doc_ln_id=ln.DocumentLnID,
                            mv_date=doc.doDate, action="IN", quantity=qty, origin_id=ln.OriginID, project_id=ln.DestinationID,
                            notes=f"{notes_base} – Traslado entrada", now=now)
-            pr_in = str(uuid.uuid4()).replace('-', '')[:8].upper()
-            _make_price(db, pr_id=pr_in, database_id=database_id, item_id=final_supply_id, mv_id=in_id,
-                        project_id=ln.DestinationID, title="Traslado Entrada", ln=ln, now=now)
+            _perform_inventory_update(db, m_in, database_id, final_supply_id, ln.SupplyID, ln.dlUnitPrice, "AI_BOT", now)
             created_count += 2
         else:
             mv_id = str(uuid.uuid4()).replace('-', '')[:8].upper()
@@ -366,26 +362,15 @@ def create_inventory_movements_logic(db: Session, document_id: str, database_id:
             if action == "OUT":
                 origin_val = (project_id or "")[:10] or None
                 dest_val = None
-                loc_eval = origin_val
             else:
                 origin_val = None
                 dest_val = (project_id or "")[:10] or None
-                loc_eval = dest_val
                 
-            _make_movement(db, mv_id=mv_id, database_id=database_id, item_id=final_supply_id, doc_ln_id=ln.DocumentLnID,
+            m = _make_movement(db, mv_id=mv_id, database_id=database_id, item_id=final_supply_id, doc_ln_id=ln.DocumentLnID,
                            mv_date=doc.doDate, action=action, quantity=qty, origin_id=origin_val, project_id=dest_val,
                            notes=notes_base, now=now)
             
-            apply_valuation_bucket_logic(
-                db=db, db_id=database_id, item_id=final_supply_id, loc_id=loc_eval,
-                q_delta=qty, row_action=action, mv_id=mv_id,
-                supply_id=ln.SupplyID, price=ln.dlUnitPrice, user="AI_BOT", now=now
-            )
-            variant = db.query(BcItemLn).filter(BcItemLn.ItemLnID == final_supply_id).first()
-            if variant:
-                delta = qty if action == "IN" else -qty
-                variant.lnQuantity = float(variant.lnQuantity or 0) + delta
-                variant.lnAvailable = float(variant.lnAvailable or 0) + delta
+            _perform_inventory_update(db, m, database_id, final_supply_id, ln.SupplyID, ln.dlUnitPrice, "AI_BOT", now)
             created_count += 1
     db.commit()
     return {"status": "success", "movements_created": created_count}
@@ -538,56 +523,22 @@ def create_item_from_url_logic(db: Session, data: dict, image_url: str, database
         t.start()
     return {"status": "success", "action": action, "item_id": item_id, "item_title": it_title, "brand_id": brand_id, "brand_name": it_brand_name or None, "database_id": database_id}
 
-def process_single_movement_logic(db: Session, data: dict):
-    mv_id = str(data.get("movement_id", "")).strip()
-    db_id = str(data.get("database_id", "")).strip()
-    item_id = str(data.get("item_id", "")).strip()
-    origin_id = str(data.get("origin_id", "")).strip() if data.get("origin_id") else None
-    dest_id = str(data.get("project_id", "")).strip() if data.get("project_id") else None
-    qty = float(data.get("qty", 0.0))
-    price = float(data.get("price", 0.0))
-    supply_id = str(data.get("supply_id", "")).strip() if data.get("supply_id") else None
-    action = str(data.get("action", "")).strip()
-    user = str(data.get("created_by", "AI_BOT")).strip()
-    now = get_now_ca()
+def _perform_inventory_update(db: Session, mv_obj: IcMovement, db_id: str, item_id: str, supply_id: str, price: float, user: str, now):
+    """ Single source of truth for inventory changes. Marks movement as POSTED. """
+    action = mv_obj.mvAction
+    qty = float(mv_obj.mvQuantity or 0)
+    origin_id = mv_obj.OriginID
+    dest_id = mv_obj.ProjectID
+    mv_id = mv_obj.MovementID
 
-    logger.info(f"Processing movement {mv_id} for item {item_id}. Action: {action}")
-
-    # 1. Movimiento (Upsert)
-    mv_obj = db.query(IcMovement).filter(IcMovement.MovementID == mv_id).first()
-    if mv_obj and mv_obj.mvStatus == "POSTED":
-        return {"status": "skipped", "reason": "POSTED", "movement_id": mv_id}
-
-    if not mv_obj:
-        mv_obj = IcMovement(MovementID=mv_id)
-        db.add(mv_obj)
-
-    mv_obj.DatabaseID = db_id
-    mv_obj.ItemID = item_id
-    mv_obj.OriginID = origin_id
-    mv_obj.ProjectID = dest_id
-    mv_obj.mvAction = action
-    mv_obj.mvQuantity = qty
-    mv_obj.mvDate = now
-    mv_obj.mvStatus = "POSTED"
-    mv_obj.mvCreatedby = user
-    mv_obj.mvCreateddate = now if not mv_obj.mvCreateddate else mv_obj.mvCreateddate
-
-    # --- HELPERS ---
     def update_net_stock(loc_id, q_delta):
-        """ icItemsStock: Consolidate to 1 row per Project/Item (Net Total) """
         if not loc_id: return
         loc_id = loc_id.strip()
-        rec = db.query(IcItemsStock).filter(
-            IcItemsStock.ItemID == item_id,
-            IcItemsStock.ProjectID == loc_id
-        ).first()
-
+        rec = db.query(IcItemsStock).filter(IcItemsStock.ItemID == item_id, IcItemsStock.ProjectID == loc_id).first()
         if rec:
             rec.stQuantity = float(rec.stQuantity or 0) + float(q_delta)
             movs = str(rec.stMovements or "")
-            if mv_id not in movs:
-                rec.stMovements = "{} , {}".format(movs, mv_id)
+            if mv_id not in movs: rec.stMovements = "{} , {}".format(movs, mv_id)
             rec.stModifiedBy = user
             rec.stModifiedAt = now
             rec.isDeleted = False
@@ -608,26 +559,64 @@ def process_single_movement_logic(db: Session, data: dict):
             variant.lnModifiedBy = user
             variant.lnModifiedAt = now
 
-    # --- EXECUTION FLOW ---
+    # Execution based on action mapping
     if action in ['Transfer', 'Reserved Transfer']:
         out_action = "OUT" if action == "Transfer" else "Reserved OUT"
         apply_valuation_bucket_logic(db, db_id, item_id, origin_id, qty, out_action, mv_id, supply_id, price, user, now)
         update_net_stock(origin_id, -qty)
-        
         apply_valuation_bucket_logic(db, db_id, item_id, dest_id, qty, action, mv_id, supply_id, price, user, now)
         update_net_stock(dest_id, qty)
-        update_global(0) # Touch bcItemsLns to trigger AppSheet sync
-        
+        update_global(0)
     elif action in ['IN', 'Reserved IN']:
         apply_valuation_bucket_logic(db, db_id, item_id, dest_id, qty, action, mv_id, supply_id, price, user, now)
         update_net_stock(dest_id, qty)
         update_global(qty)
-        
     elif action in ['OUT', 'Reserved OUT']:
         apply_valuation_bucket_logic(db, db_id, item_id, origin_id, qty, action, mv_id, supply_id, price, user, now)
         update_net_stock(origin_id, -qty)
         update_global(-qty)
 
+    mv_obj.mvStatus = "POSTED"
+    mv_obj.mvModifiedby = user
+    mv_obj.mvModifieddate = now
+
+def process_single_movement_logic(db: Session, data: dict):
+    mv_id = str(data.get("movement_id", "")).strip()
+    db_id = str(data.get("database_id", "")).strip()
+    item_id = str(data.get("item_id", "")).strip()
+    origin_id = str(data.get("origin_id", "")).strip() if data.get("origin_id") else None
+    dest_id = str(data.get("project_id", "")).strip() if data.get("project_id") else None
+    qty = float(data.get("qty", 0.0))
+    price = float(data.get("price", 0.0))
+    supply_id = str(data.get("supply_id", "")).strip() if data.get("supply_id") else None
+    action = str(data.get("action", "")).strip()
+    user = str(data.get("created_by", "AI_BOT")).strip()
+    now = get_now_ca()
+
+    logger.info(f"Processing movement {mv_id} for item {item_id}. Action: {action}")
+
+    # Row-level lock to prevent concurrent webhook execution
+    mv_obj = db.query(IcMovement).filter(IcMovement.MovementID == mv_id).with_for_update().first()
+    
+    if mv_obj and mv_obj.mvStatus == "POSTED":
+        return {"status": "skipped", "reason": "POSTED", "movement_id": mv_id}
+
+    if not mv_obj:
+        mv_obj = IcMovement(MovementID=mv_id)
+        db.add(mv_obj)
+
+    mv_obj.DatabaseID = db_id
+    mv_obj.ItemID = item_id
+    mv_obj.OriginID = origin_id
+    mv_obj.ProjectID = dest_id
+    mv_obj.mvAction = action
+    mv_obj.mvQuantity = qty
+    mv_obj.mvDate = now
+    mv_obj.mvCreatedby = user
+    mv_obj.mvCreateddate = now if not mv_obj.mvCreateddate else mv_obj.mvCreateddate
+
+    _perform_inventory_update(db, mv_obj, db_id, item_id, supply_id, price, user, now)
+    
     db.commit()
     logger.info(f"Movement {mv_id} processed successfully for item {item_id}")
     return {"status": "success", "processed_action": action, "item_id": item_id}
