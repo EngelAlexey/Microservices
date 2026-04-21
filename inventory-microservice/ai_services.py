@@ -148,18 +148,23 @@ def extract_company_data(pdf_content_bytes):
         return None
 
 _PRODUCT_URL_PROMPT = """You are a product catalog extraction assistant.
-You will receive raw HTML from an e-commerce product page. Extract all available structured product data.
+You will receive raw HTML from an e-commerce product page. Extract structured product data according to the following database hierarchy:
+
+1. Table 'bcItems' (PARENT): Generic master product.
+   - itTitle: MUST be a generic, short name. NO brand, NO measures, NO capacity, NO specific material details. (e.g., 'Inodoro', 'Cemento', 'Adhesivo').
+   - itDescription: Overall features of the base product.
+2. Table 'bcItemsLns' (CHILD): Specific variant/presentation.
+   - itModel: MUST contain ALL identifying details of this specific variant (e.g., '2 Piezas 3.8 L Bone Olympus', 'Industrial Grade 50kg', 'Galón').
 
 Rules:
-1. If a field is not found, use null.
-2. For the price, extract only the numeric value (no currency symbols).
-3. Brand should be the manufacturer/brand of the product, not the store.
-4. Category should be a broad category (e.g., Spirits, Wine, Beer, Electronics, etc.).
-5. Subcategory should be a more specific type (e.g., Gin, Bourbon, IPA, etc.).
-6. model should be the specific variant or presentation (e.g., '700ml', 'Wild Berry').
-7. Extract all tags/labels if available.
+1. itTitle (Generic Parent): Do not include specific technical specs here. Focus on the base entity name.
+2. itModel (Specific Variant): This is where you put all the details like sizes, weights, colors, models, and specific versions.
+3. itBrand: Identification of the manufacturer/brand.
+4. itCategory/itSubcategory: Broad and specific classification.
+5. If a field is not found, use null.
+6. Return plain text only (no HTML tags).
 
-Return JSON format:
+Return JSON:
 {
     "itTitle": "string",
     "itDescription": "string",

@@ -25,6 +25,12 @@ def safe_float(val):
     except ValueError:
         return 0.0
 
+def strip_html_tags(text):
+    if not text:
+        return ""
+    clean = re.compile('<.*?>')
+    return re.sub(clean, '', str(text)).strip()
+
 def get_now_ca():
     return datetime.now(timezone(timedelta(hours=-6))).replace(tzinfo=None)
 
@@ -255,24 +261,28 @@ def _determine_action(doc_account: str, doc_type: str) -> str:
 
 def _make_movement(db: Session, *, mv_id: str, database_id: str, item_id: str,
                    doc_ln_id: str, mv_date, action: str, quantity: float,
-                   origin_id: str, project_id: str, notes: str, now):
+                   origin_id: str, project_id: str, notes: str, now,
+                   unit_cost: float = 0, unit_tax: float = 0, total_cost: float = 0):
     m = IcMovement(
         MovementID=mv_id, DatabaseID=database_id, OriginID=(origin_id or "")[:10] or None,
         ProjectID=(project_id or "")[:10] or None, ItemID=(item_id or "")[:10],
-        DocumentLnID=doc_ln_id, mvDate=now, # Always use current time for inventory status
-        mvAction=action, mvQuantity=quantity, mvStatus="POSTED", mvNotes=notes,
+        DocumentLnID=doc_ln_id, mvDate=now,
+        mvAction=action, mvQuantity=quantity,
+        mvUnitCost=unit_cost, mvTax=unit_tax, mvTotalCost=total_cost,
+        mvStatus="POSTED", mvNotes=notes,
         mvCreatedby="AI_BOT", mvCreateddate=now,
         mvModifiedby="AI_BOT", mvModifieddate=now
     )
     db.add(m)
     return m
 
-def apply_valuation_bucket_logic(db: Session, db_id: str, item_id: str, loc_id: str, q_delta: float, 
-                                 row_action: str, mv_id: str, supply_id: str, price: float, user: str, now):
+def apply_valuation_bucket_logic(db: Session, db_id: str, item_id: str, loc_id: str, q_delta: float,
+                                 row_action: str, mv_id: str, supply_id: str, price: float, user: str, now,
+                                 unit_tax: float = 0):
     """ icItemsPrices: Replicando logica de AppSheet (ISBLANK / TOP 1 FILTER LIST) """
     if not loc_id: return
     loc_id = str(loc_id).strip()
-    
+
     inward_titles = ["IN", "Reserved IN", "Transfer", "Reserved Transfer"]
     outward_titles = ["OUT", "Reserved OUT"]
 
@@ -288,13 +298,15 @@ def apply_valuation_bucket_logic(db: Session, db_id: str, item_id: str, loc_id: 
         ).first()
         if rec_in:
             rec_in.prQuantity = float(rec_in.prQuantity or 0) - float(q_delta)
-            rec_in.prTotal = float(rec_in.prQuantity) * float(rec_in.prPrice or price)
+            _unit_price = float(rec_in.prPrice or price)
+            _unit_tax = float(rec_in.prTax or unit_tax)
+            rec_in.prTotal = float(rec_in.prQuantity) * (_unit_price + _unit_tax)
             rec_in.prModifiedby = user
             rec_in.prModifieddate = now
 
     # ISBLANK / TOP 1 para sumar o crear fila de la action respectiva
     search_list = outward_titles if is_outward else inward_titles
-    
+
     rec_bucket = db.query(IcPrice).filter(
         IcPrice.ItemID == item_id,
         IcPrice.ProjectID == loc_id,
@@ -304,7 +316,9 @@ def apply_valuation_bucket_logic(db: Session, db_id: str, item_id: str, loc_id: 
 
     if rec_bucket:
         rec_bucket.prQuantity = float(rec_bucket.prQuantity or 0) + float(q_delta)
-        rec_bucket.prTotal = float(rec_bucket.prQuantity) * float(rec_bucket.prPrice or price)
+        _unit_price = float(rec_bucket.prPrice or price)
+        _unit_tax = float(rec_bucket.prTax or unit_tax)
+        rec_bucket.prTotal = float(rec_bucket.prQuantity) * (_unit_price + _unit_tax)
         rec_bucket.prModifiedby = user
         rec_bucket.prModifieddate = now
     else:
@@ -313,7 +327,8 @@ def apply_valuation_bucket_logic(db: Session, db_id: str, item_id: str, loc_id: 
             DatabaseID=db_id, ItemID=(item_id or "")[:10], ProjectID=(loc_id or "")[:10] or None,
             MovementID=mv_id, SupplyID=supply_id,
             prTitle=row_action, prDescription=f"Micro: {row_action}",
-            prQuantity=q_delta, prPrice=price, prTotal=float(q_delta)*float(price),
+            prQuantity=q_delta, prPrice=price, prTax=unit_tax,
+            prTotal=float(q_delta) * (float(price) + float(unit_tax)),
             prCreatedby=user, prCreateddate=now,
             prModifiedby=user, prModifieddate=now, isDeleted=False
         ))
@@ -334,43 +349,47 @@ def create_inventory_movements_logic(db: Session, document_id: str, database_id:
             continue
         now = get_now_ca()
         qty = float(ln.dlQuantity or 0)
+        if qty == 0:
+            continue
+        net_unit_price = float(ln.dlSubtotal or 0) / qty  # precio neto unitario (con descuento)
+        unit_tax = float(ln.dlTaxes or 0) / qty           # impuesto unitario
+        total_cost = float(ln.dlTotal or 0)               # total de la línea
         notes_base = f"Doc {doc.doConsecutive or document_id}"
-        
+
         # Determine basic action
         action = _determine_action(doc.doAccount, doc.doType)
 
         if ln.OriginID and ln.DestinationID:
             out_id = str(uuid.uuid4()).replace('-', '')[:8].upper()
-            # OUT from Origin to Destination
             m_out = _make_movement(db, mv_id=out_id, database_id=database_id, item_id=final_supply_id, doc_ln_id=ln.DocumentLnID,
                            mv_date=doc.doDate, action="OUT", quantity=qty, origin_id=ln.OriginID, project_id=ln.DestinationID,
-                           notes=f"{notes_base} – Traslado salida", now=now)
-            _perform_inventory_update(db, m_out, database_id, final_supply_id, ln.SupplyID, ln.dlUnitPrice, "AI_BOT", now)
-            
+                           notes=f"{notes_base} – Traslado salida", now=now,
+                           unit_cost=net_unit_price, unit_tax=unit_tax, total_cost=total_cost)
+            _perform_inventory_update(db, m_out, database_id, final_supply_id, ln.SupplyID, net_unit_price, "AI_BOT", now, unit_tax)
+
             in_id = str(uuid.uuid4()).replace('-', '')[:8].upper()
-            # IN to Destination from Origin
             m_in = _make_movement(db, mv_id=in_id, database_id=database_id, item_id=final_supply_id, doc_ln_id=ln.DocumentLnID,
                            mv_date=doc.doDate, action="IN", quantity=qty, origin_id=ln.OriginID, project_id=ln.DestinationID,
-                           notes=f"{notes_base} – Traslado entrada", now=now)
-            _perform_inventory_update(db, m_in, database_id, final_supply_id, ln.SupplyID, ln.dlUnitPrice, "AI_BOT", now)
+                           notes=f"{notes_base} – Traslado entrada", now=now,
+                           unit_cost=net_unit_price, unit_tax=unit_tax, total_cost=total_cost)
+            _perform_inventory_update(db, m_in, database_id, final_supply_id, ln.SupplyID, net_unit_price, "AI_BOT", now, unit_tax)
             created_count += 2
         else:
             mv_id = str(uuid.uuid4()).replace('-', '')[:8].upper()
-            
-            # Recinto logic: Semantic mapping
-            # OUT -> Origin, IN -> Project (Destino)
+
             if action == "OUT":
                 origin_val = (project_id or "")[:10] or None
                 dest_val = None
             else:
                 origin_val = None
                 dest_val = (project_id or "")[:10] or None
-                
+
             m = _make_movement(db, mv_id=mv_id, database_id=database_id, item_id=final_supply_id, doc_ln_id=ln.DocumentLnID,
                            mv_date=doc.doDate, action=action, quantity=qty, origin_id=origin_val, project_id=dest_val,
-                           notes=notes_base, now=now)
-            
-            _perform_inventory_update(db, m, database_id, final_supply_id, ln.SupplyID, ln.dlUnitPrice, "AI_BOT", now)
+                           notes=notes_base, now=now,
+                           unit_cost=net_unit_price, unit_tax=unit_tax, total_cost=total_cost)
+
+            _perform_inventory_update(db, m, database_id, final_supply_id, ln.SupplyID, net_unit_price, "AI_BOT", now, unit_tax)
             created_count += 1
     db.commit()
     return {"status": "success", "movements_created": created_count}
@@ -447,8 +466,8 @@ def create_item_from_url_logic(db: Session, data: dict, image_url: str, database
     it_category = str(data.get("itCategory") or "").strip()[:45]
     it_subcategory = str(data.get("itSubcategory") or "").strip()[:45]
     it_model = str(data.get("itModel") or "").strip()[:45]
-    it_description = str(data.get("itDescription") or "").strip()
-    it_observations = str(data.get("itObservations") or "").strip()
+    it_description = strip_html_tags(data.get("itDescription"))
+    it_observations = strip_html_tags(data.get("itObservations"))
     now = get_now_ca()
     if not it_title: return {"status": "error", "reason": "No se pudo extraer el nombre del producto"}
     brand_id = None
@@ -491,8 +510,8 @@ def create_item_from_url_logic(db: Session, data: dict, image_url: str, database
         ln_id = str(uuid.uuid4()).replace('-', '')[:8].upper()
         new_ln = BcItemLn(
             ItemLnID=ln_id, ItemID=item_id, DatabaseID=database_id, lnCode=ln_id, lnTitle=ln_title[:150],
-            lnSize=it_model[:100] if it_model else "", lnBarcode="", lnSpecs="", UnitID="UND", inCertification="",
-            lnWeight="", lnQuantity=0, lnAvailable=0, lnFeatures="", lnObservations="", lnStatus=True,
+            lnSpecs=it_model[:100] if it_model else "", lnBarcode="", lnPresentation="", UnitID="UND", inCertification="",
+            lnWeight="", lnQuantity=0, lnAvailable=0, lnFeatures=brand_id or "", lnObservations="", lnStatus=True,
             lnCreatedBy="AI_BOT", lnCreatedAt=now, lnModifiedBy="AI_BOT", lnModifiedAt=now, Bot="ADDED"
         )
         db.add(new_ln)
@@ -500,7 +519,8 @@ def create_item_from_url_logic(db: Session, data: dict, image_url: str, database
     else:
         existing_ln.lnModifiedBy = "AI_BOT"
         existing_ln.lnModifiedAt = now
-        if not existing_ln.lnSize and it_model: existing_ln.lnSize = it_model[:100]
+        if not existing_ln.lnSpecs and it_model: existing_ln.lnSpecs = it_model[:100]
+        if brand_id: existing_ln.lnFeatures = brand_id
         db.commit()
     if image_url and image_folder_id:
         img_filename = f"{item_id}.jpg"
@@ -523,7 +543,8 @@ def create_item_from_url_logic(db: Session, data: dict, image_url: str, database
         t.start()
     return {"status": "success", "action": action, "item_id": item_id, "item_title": it_title, "brand_id": brand_id, "brand_name": it_brand_name or None, "database_id": database_id}
 
-def _perform_inventory_update(db: Session, mv_obj: IcMovement, db_id: str, item_id: str, supply_id: str, price: float, user: str, now):
+def _perform_inventory_update(db: Session, mv_obj: IcMovement, db_id: str, item_id: str, supply_id: str, price: float, user: str, now,
+                              unit_tax: float = 0):
     """ Single source of truth for inventory changes. Marks movement as POSTED. """
     action = mv_obj.mvAction
     qty = float(mv_obj.mvQuantity or 0)
@@ -562,17 +583,17 @@ def _perform_inventory_update(db: Session, mv_obj: IcMovement, db_id: str, item_
     # Execution based on action mapping
     if action in ['Transfer', 'Reserved Transfer']:
         out_action = "OUT" if action == "Transfer" else "Reserved OUT"
-        apply_valuation_bucket_logic(db, db_id, item_id, origin_id, qty, out_action, mv_id, supply_id, price, user, now)
+        apply_valuation_bucket_logic(db, db_id, item_id, origin_id, qty, out_action, mv_id, supply_id, price, user, now, unit_tax)
         update_net_stock(origin_id, -qty)
-        apply_valuation_bucket_logic(db, db_id, item_id, dest_id, qty, action, mv_id, supply_id, price, user, now)
+        apply_valuation_bucket_logic(db, db_id, item_id, dest_id, qty, action, mv_id, supply_id, price, user, now, unit_tax)
         update_net_stock(dest_id, qty)
         update_global(0)
     elif action in ['IN', 'Reserved IN']:
-        apply_valuation_bucket_logic(db, db_id, item_id, dest_id, qty, action, mv_id, supply_id, price, user, now)
+        apply_valuation_bucket_logic(db, db_id, item_id, dest_id, qty, action, mv_id, supply_id, price, user, now, unit_tax)
         update_net_stock(dest_id, qty)
         update_global(qty)
     elif action in ['OUT', 'Reserved OUT']:
-        apply_valuation_bucket_logic(db, db_id, item_id, origin_id, qty, action, mv_id, supply_id, price, user, now)
+        apply_valuation_bucket_logic(db, db_id, item_id, origin_id, qty, action, mv_id, supply_id, price, user, now, unit_tax)
         update_net_stock(origin_id, -qty)
         update_global(-qty)
 
@@ -588,6 +609,8 @@ def process_single_movement_logic(db: Session, data: dict):
     dest_id = str(data.get("project_id", "")).strip() if data.get("project_id") else None
     qty = float(data.get("qty", 0.0))
     price = float(data.get("price", 0.0))
+    unit_tax = float(data.get("unit_tax", 0.0))
+    total_cost = float(data.get("total_cost", 0.0)) or (qty * (price + unit_tax))
     supply_id = str(data.get("supply_id", "")).strip() if data.get("supply_id") else None
     action = str(data.get("action", "")).strip()
     user = str(data.get("created_by", "AI_BOT")).strip()
@@ -611,12 +634,130 @@ def process_single_movement_logic(db: Session, data: dict):
     mv_obj.ProjectID = dest_id
     mv_obj.mvAction = action
     mv_obj.mvQuantity = qty
+    mv_obj.mvUnitCost = price
+    mv_obj.mvTax = unit_tax
+    mv_obj.mvTotalCost = total_cost
     mv_obj.mvDate = now
     mv_obj.mvCreatedby = user
     mv_obj.mvCreateddate = now if not mv_obj.mvCreateddate else mv_obj.mvCreateddate
 
-    _perform_inventory_update(db, mv_obj, db_id, item_id, supply_id, price, user, now)
-    
+    _perform_inventory_update(db, mv_obj, db_id, item_id, supply_id, price, user, now, unit_tax)
+
     db.commit()
     logger.info(f"Movement {mv_id} processed successfully for item {item_id}")
     return {"status": "success", "processed_action": action, "item_id": item_id}
+
+def backfill_movement_costs_logic(db: Session, database_id: str, limit: int = None):
+    """
+    Corrige retroactivamente mvUnitCost/mvTax/mvTotalCost en icMovements
+    y prPrice/prTax/prTotal en icItemsPrices para todos los registros que
+    provienen de una línea de documento (DocumentLnID presente).
+    Crea registros faltantes en icItemsPrices para movimientos que nunca
+    generaron su bucket (e.g. movimientos pre-refactor con recinto en campo erróneo).
+    Usar limit=N para verificar antes de correr completo.
+    """
+    inward_actions  = ["IN", "Reserved IN", "Transfer", "Reserved Transfer"]
+    outward_actions = ["OUT", "Reserved OUT"]
+
+    q = (
+        db.query(IcMovement)
+        .join(FnDocumentLn, IcMovement.DocumentLnID == FnDocumentLn.DocumentLnID)
+        .join(FnDocument, FnDocumentLn.DocumentID == FnDocument.DocumentID)
+        .filter(
+            IcMovement.DatabaseID == database_id,
+            IcMovement.DocumentLnID.isnot(None),
+            FnDocument.Bot == "ADDED"
+        )
+    )
+    if limit:
+        q = q.limit(limit)
+    movements = q.all()
+
+    updated_mv = 0
+    updated_price = 0
+    created_price = 0
+    skipped = 0
+
+    for mv in movements:
+        ln = db.query(FnDocumentLn).filter(FnDocumentLn.DocumentLnID == mv.DocumentLnID).first()
+        if not ln:
+            skipped += 1
+            continue
+
+        qty = float(ln.dlQuantity or 0)
+        if qty == 0:
+            skipped += 1
+            continue
+
+        net_unit_price = float(ln.dlSubtotal or 0) / qty
+        unit_tax = float(ln.dlTaxes or 0) / qty
+        total_cost = float(ln.dlTotal or 0)
+
+        mv.mvUnitCost = net_unit_price
+        mv.mvTax = unit_tax
+        mv.mvTotalCost = total_cost
+        updated_mv += 1
+
+        # Actualizar buckets existentes vinculados a este movimiento
+        price_recs = db.query(IcPrice).filter(IcPrice.MovementID == mv.MovementID).all()
+        for pr in price_recs:
+            pr.prPrice = net_unit_price
+            pr.prTax = unit_tax
+            pr.prTotal = float(pr.prQuantity or 0) * (net_unit_price + unit_tax)
+            updated_price += 1
+
+        # Si no existe ningún bucket para este movimiento, crearlo.
+        # Compatibilidad pre-refactor: IN guardaba recinto en OriginID, OUT en ProjectID.
+        if not price_recs:
+            action = mv.mvAction or ""
+            if action in inward_actions:
+                loc_id = mv.ProjectID or mv.OriginID
+            elif action in outward_actions:
+                loc_id = mv.OriginID or mv.ProjectID
+            else:
+                loc_id = None
+
+            if loc_id:
+                existing_bucket = db.query(IcPrice).filter(
+                    IcPrice.ItemID == mv.ItemID,
+                    IcPrice.ProjectID == loc_id,
+                    IcPrice.prTitle == action,
+                    IcPrice.isDeleted == False
+                ).first()
+
+                if existing_bucket:
+                    existing_bucket.prQuantity = float(existing_bucket.prQuantity or 0) + qty
+                    existing_bucket.prPrice = net_unit_price
+                    existing_bucket.prTax = unit_tax
+                    existing_bucket.prTotal = float(existing_bucket.prQuantity) * (net_unit_price + unit_tax)
+                    updated_price += 1
+                else:
+                    db.add(IcPrice(
+                        PriceID=str(uuid.uuid4()).replace('-', '')[:10].upper(),
+                        DatabaseID=database_id,
+                        ItemID=(mv.ItemID or "")[:10],
+                        ProjectID=str(loc_id)[:10],
+                        MovementID=mv.MovementID,
+                        SupplyID=mv.ItemID,
+                        prTitle=action,
+                        prDescription=f"Backfill: {action}",
+                        prQuantity=qty,
+                        prPrice=net_unit_price,
+                        prTax=unit_tax,
+                        prTotal=qty * (net_unit_price + unit_tax),
+                        prCreatedby=mv.mvCreatedby,
+                        prCreateddate=mv.mvCreateddate,
+                        prModifiedby=mv.mvModifiedby,
+                        prModifieddate=mv.mvModifieddate,
+                        isDeleted=False
+                    ))
+                    created_price += 1
+
+    db.commit()
+    return {
+        "status": "success",
+        "movements_updated": updated_mv,
+        "price_records_updated": updated_price,
+        "price_records_created": created_price,
+        "skipped": skipped
+    }

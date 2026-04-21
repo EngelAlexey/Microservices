@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 from database import get_db, SessionLocal
 from models import FnDocument 
 from ai_services import extract_invoice_data, extract_company_data, extract_product_from_html
-from logic import insert_document_logic, upsert_company_from_invoice_logic, create_item_from_url_logic, create_inventory_movements_logic, process_single_movement_logic
+from logic import insert_document_logic, upsert_company_from_invoice_logic, create_item_from_url_logic, create_inventory_movements_logic, process_single_movement_logic, backfill_movement_costs_logic
 from drive_services import download_with_validation, resolve_file_id
 from scrape_services import scrape_product_page
 
@@ -47,9 +47,15 @@ class SingleMovementPayload(BaseModel):
     project_id: str | None = None
     qty: float
     price: float | None = 0.0
+    unit_tax: float | None = 0.0
+    total_cost: float | None = 0.0
     supply_id: str | None = None
     action: str
     created_by: str | None = "AI_BOT"
+
+class BackfillPayload(BaseModel):
+    database_id: str
+    limit: int | None = None
 
 @app.get("/")
 def read_root():
@@ -177,6 +183,20 @@ async def process_movement_endpoint(payload: SingleMovementPayload, db: Session 
         return {"status": "success", "data": result}
     except Exception as e:
         logger.error(f"Error procesando movimiento: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/admin/backfill-costs")
+async def backfill_costs(payload: BackfillPayload, db: Session = Depends(get_db)):
+    """
+    Corrige retroactivamente mvUnitCost, mvTax, mvTotalCost en icMovements
+    y prPrice, prTax, prTotal en icItemsPrices para todos los registros de la base de datos indicada.
+    Usar una sola vez por database_id para sanear datos históricos.
+    """
+    try:
+        result = backfill_movement_costs_logic(db, payload.database_id, payload.limit)
+        return {"status": "success", "data": result}
+    except Exception as e:
+        logger.error(f"Error en backfill de costos: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":
