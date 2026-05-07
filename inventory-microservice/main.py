@@ -60,7 +60,7 @@ class BackfillPayload(BaseModel):
 class SyncRFQLinesPayload(BaseModel):
     rfq_id: str
     database_id: str
-    selected_ids: list[str]
+    selected_ids: str
 
 @app.get("/")
 def read_root():

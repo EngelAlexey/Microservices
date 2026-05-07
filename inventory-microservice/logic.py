@@ -765,9 +765,12 @@ def backfill_movement_costs_logic(db: Session, database_id: str, limit: int = No
 def sync_rfq_lines_logic(db: Session, data: dict):
     rfq_id = str(data.get("rfq_id", "")).strip()
     db_id = str(data.get("database_id", "")).strip()
-    selected_ids = data.get("selected_ids", [])
 
-    selected_ids = [str(sid).strip() for sid in selected_ids if str(sid).strip()]
+    raw_ids = str(data.get("selected_ids", "")).strip()
+    if raw_ids:
+        selected_ids = [sid.strip() for sid in raw_ids.split(",") if sid.strip()]
+    else:
+        selected_ids = []
 
     if not rfq_id:
         return {"status": "error", "reason": "No RFQID provided"}
