@@ -5,7 +5,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 import logging
 import re
-from sqlalchemy import func
+from sqlalchemy import func, text
 from image_services import search_product_image
 from drive_services import upload_image_to_drive, get_folder_path_from_drive
 import threading
@@ -761,3 +761,83 @@ def backfill_movement_costs_logic(db: Session, database_id: str, limit: int = No
         "price_records_created": created_price,
         "skipped": skipped
     }
+
+def sync_rfq_lines_logic(db: Session, data: dict):
+    rfq_id = str(data.get("rfq_id", "")).strip()
+    db_id = str(data.get("database_id", "")).strip()
+    selected_ids = data.get("selected_ids", [])
+
+    selected_ids = [str(sid).strip() for sid in selected_ids if str(sid).strip()]
+
+    if not rfq_id:
+        return {"status": "error", "reason": "No RFQID provided"}
+
+    now = get_now_ca()
+
+    try:
+        if not selected_ids:
+            db.execute(
+                text("DELETE FROM bcRFQLns WHERE RFQID = :rfq_id"),
+                {"rfq_id": rfq_id}
+            )
+            db.commit()
+            return {"status": "success", "action": "cleared_all"}
+
+        format_strings = ','.join([f':id_{i}' for i in range(len(selected_ids))])
+        delete_params = {f'id_{i}': sid for i, sid in enumerate(selected_ids)}
+        delete_params['rfq_id'] = rfq_id
+
+        delete_query = f"DELETE FROM bcRFQLns WHERE RFQID = :rfq_id AND OriginalRequestLnID NOT IN ({format_strings})"
+        db.execute(text(delete_query), delete_params)
+
+        existing_recs = db.execute(
+            text("SELECT OriginalRequestLnID FROM bcRFQLns WHERE RFQID = :rfq_id"),
+            {"rfq_id": rfq_id}
+        ).fetchall()
+        existing_ids = {row[0] for row in existing_recs}
+
+        to_insert = [sid for sid in selected_ids if sid not in existing_ids]
+
+        if to_insert:
+            insert_format = ','.join([f':ins_{i}' for i in range(len(to_insert))])
+            ins_params = {f'ins_{i}': sid for i, sid in enumerate(to_insert)}
+
+            select_query = f"""
+                SELECT RequestLnID, ItemID, rlQuality, rlObservations, UnitID
+                FROM bcRequestsLns
+                WHERE RequestLnID IN ({insert_format}) AND (isDeleted = 0 OR isDeleted IS NULL)
+            """
+            source_lines = db.execute(text(select_query), ins_params).fetchall()
+
+            for row in source_lines:
+                new_id = str(uuid.uuid4()).replace('-', '')[:10].upper()
+                db.execute(
+                    text("""
+                        INSERT INTO bcRFQLns (
+                            RFQLnID, DatabaseID, RFQID, OriginalRequestLnID,
+                            ItemID, rfQuality, rfObservations, UnitID, rfTimestamp
+                        ) VALUES (
+                            :new_id, :db_id, :rfq_id, :req_id,
+                            :item_id, :qty, :obs, :unit_id, :now
+                        )
+                    """),
+                    {
+                        "new_id": new_id,
+                        "db_id": db_id,
+                        "rfq_id": rfq_id,
+                        "req_id": row[0],
+                        "item_id": row[1],
+                        "qty": row[2] if row[2] is not None else 0.0,
+                        "obs": row[3],
+                        "unit_id": row[4],
+                        "now": now
+                    }
+                )
+
+        db.commit()
+        return {"status": "success", "inserted": len(to_insert), "deleted_eval": True}
+
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Failed sync RFQ lines: {str(e)}")
+        raise

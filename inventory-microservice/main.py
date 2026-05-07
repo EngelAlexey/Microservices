@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 from database import get_db, SessionLocal
 from models import FnDocument 
 from ai_services import extract_invoice_data, extract_company_data, extract_product_from_html
-from logic import insert_document_logic, upsert_company_from_invoice_logic, create_item_from_url_logic, create_inventory_movements_logic, process_single_movement_logic, backfill_movement_costs_logic
+from logic import insert_document_logic, upsert_company_from_invoice_logic, create_item_from_url_logic, create_inventory_movements_logic, process_single_movement_logic, backfill_movement_costs_logic, sync_rfq_lines_logic
 from drive_services import download_with_validation, resolve_file_id
 from scrape_services import scrape_product_page
 
@@ -56,6 +56,11 @@ class SingleMovementPayload(BaseModel):
 class BackfillPayload(BaseModel):
     database_id: str
     limit: int | None = None
+
+class SyncRFQLinesPayload(BaseModel):
+    rfq_id: str
+    database_id: str
+    selected_ids: list[str]
 
 @app.get("/")
 def read_root():
@@ -197,6 +202,15 @@ async def backfill_costs(payload: BackfillPayload, db: Session = Depends(get_db)
         return {"status": "success", "data": result}
     except Exception as e:
         logger.error(f"Error en backfill de costos: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/webhook/sync-rfq-lines")
+async def sync_rfq_lines(payload: SyncRFQLinesPayload, db: Session = Depends(get_db)):
+    try:
+        result = sync_rfq_lines_logic(db, payload.model_dump())
+        return {"status": "success", "data": result}
+    except Exception as e:
+        logger.error(f"Error en sync-rfq-lines: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":
