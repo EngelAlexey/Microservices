@@ -805,6 +805,10 @@ def sync_rfq_lines_logic(db: Session, data: dict):
             insert_format = ','.join([f':ins_{i}' for i in range(len(to_insert))])
             ins_params = {f'ins_{i}': sid for i, sid in enumerate(to_insert)}
 
+            max_line_query = "SELECT MAX(rfLineNumber) FROM bcRFQLns WHERE RFQID = :rfq_id"
+            current_max = db.execute(text(max_line_query), {"rfq_id": rfq_id}).scalar()
+            next_line_num = (current_max or 0) + 1
+
             select_query = f"""
                 SELECT RequestLnID, ItemID, rlQuality, rlObservations, UnitID
                 FROM bcRequestsLns
@@ -818,10 +822,10 @@ def sync_rfq_lines_logic(db: Session, data: dict):
                     text("""
                         INSERT INTO bcRFQLns (
                             RFQLnID, DatabaseID, RFQID, OriginalRequestLnID,
-                            ItemID, rfQuality, rfObservations, UnitID, rfTimestamp
+                            ItemID, rfQuality, rfObservations, UnitID, rfTimestamp, rfLineNumber
                         ) VALUES (
                             :new_id, :db_id, :rfq_id, :req_id,
-                            :item_id, :qty, :obs, :unit_id, :now
+                            :item_id, :qty, :obs, :unit_id, :now, :line_num
                         )
                     """),
                     {
@@ -833,9 +837,11 @@ def sync_rfq_lines_logic(db: Session, data: dict):
                         "qty": row[2] if row[2] is not None else 0.0,
                         "obs": row[3],
                         "unit_id": row[4],
-                        "now": now
+                        "now": now,
+                        "line_num": next_line_num
                     }
                 )
+                next_line_num += 1
 
         db.commit()
         return {"status": "success", "inserted": len(to_insert), "deleted_eval": True}
