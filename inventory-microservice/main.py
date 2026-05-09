@@ -227,8 +227,8 @@ async def execute_broadcast(payload: BroadcastInput):
     numbers_raw = payload.targetNumbers.split(",")
     numbers = [re.sub(r'\D', '', num) for num in numbers_raw if num.strip()]
     
-    url = os.environ.get("BUILDERBOT_URL", "[REEMPLAZAR_CON_LOGICA_URL]")
-    api_key = os.environ.get("BUILDERBOT_API_KEY", "[REEMPLAZAR_CON_LOGICA_API_KEY]")
+    url = os.environ.get("BUILDERBOT_URL", os.environ.get("BUILDERBOT_URL"))
+    api_key = os.environ.get("BUILDERBOT_API_KEY", os.environ.get("BUILDERBOT_API_KEY"))
     
     headers = {
         "Content-Type": "application/json",
