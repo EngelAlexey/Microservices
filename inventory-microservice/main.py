@@ -1,3 +1,4 @@
+import re
 import logging
 import time
 import asyncio
@@ -223,15 +224,22 @@ async def sync_rfq_lines(payload: SyncRFQLinesPayload, db: Session = Depends(get
         raise HTTPException(status_code=500, detail=str(e))
 
 async def execute_broadcast(payload: BroadcastInput):
-    numbers = [num.strip() for num in payload.targetNumbers.split(",") if num.strip()]
-    url = os.environ.get("BUILDERBOT_URL", "[REEMPLAZAR_CON_LOGICA]")
-    api_key = os.environ.get("BUILDERBOT_API_KEY", "[REEMPLAZAR_CON_LOGICA]")
+    numbers_raw = payload.targetNumbers.split(",")
+    numbers = [re.sub(r'\D', '', num) for num in numbers_raw if num.strip()]
+    
+    url = os.environ.get("BUILDERBOT_URL", "[REEMPLAZAR_CON_LOGICA_URL]")
+    api_key = os.environ.get("BUILDERBOT_API_KEY", "[REEMPLAZAR_CON_LOGICA_API_KEY]")
+    
     headers = {
         "Content-Type": "application/json",
         "x-api-builderbot": api_key
     }
+
     async with aiohttp.ClientSession() as session:
         for number in numbers:
+            if not number:
+                continue
+                
             body = {
                 "messages": {
                     "content": payload.messageData.content,
@@ -242,9 +250,11 @@ async def execute_broadcast(payload: BroadcastInput):
             }
             try:
                 async with session.post(url, headers=headers, json=body) as response:
-                    await response.read()
-            except Exception:
-                pass
+                    resp_text = await response.text()
+                    if response.status >= 400:
+                        logging.error(f"BuilderBot Error {response.status}: {resp_text}")
+            except Exception as e:
+                logging.error(f"HTTP Request Error: {str(e)}")
             await asyncio.sleep(1.5)
 
 @app.post("/webhook/broadcast")
