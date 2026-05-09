@@ -3,7 +3,8 @@ import time
 import asyncio
 import os
 from concurrent.futures import ThreadPoolExecutor
-from fastapi import FastAPI, HTTPException, Depends
+import aiohttp
+from fastapi import FastAPI, HTTPException, Depends, BackgroundTasks
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from database import get_db, SessionLocal
@@ -61,6 +62,14 @@ class SyncRFQLinesPayload(BaseModel):
     rfq_id: str
     database_id: str
     selected_ids: str
+
+class MessageContent(BaseModel):
+    content: str
+    mediaUrl: str
+
+class BroadcastInput(BaseModel):
+    messageData: MessageContent
+    targetNumbers: str
 
 @app.get("/")
 def read_root():
@@ -212,6 +221,36 @@ async def sync_rfq_lines(payload: SyncRFQLinesPayload, db: Session = Depends(get
     except Exception as e:
         logger.error(f"Error en sync-rfq-lines: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
+
+async def execute_broadcast(payload: BroadcastInput):
+    numbers = [num.strip() for num in payload.targetNumbers.split(",") if num.strip()]
+    url = os.environ.get("BUILDERBOT_URL", "[REEMPLAZAR_CON_LOGICA]")
+    api_key = os.environ.get("BUILDERBOT_API_KEY", "[REEMPLAZAR_CON_LOGICA]")
+    headers = {
+        "Content-Type": "application/json",
+        "x-api-builderbot": api_key
+    }
+    async with aiohttp.ClientSession() as session:
+        for number in numbers:
+            body = {
+                "messages": {
+                    "content": payload.messageData.content,
+                    "mediaUrl": payload.messageData.mediaUrl
+                },
+                "number": number,
+                "checkIfExists": False
+            }
+            try:
+                async with session.post(url, headers=headers, json=body) as response:
+                    await response.read()
+            except Exception:
+                pass
+            await asyncio.sleep(1.5)
+
+@app.post("/webhook/broadcast")
+async def trigger_broadcast(payload: BroadcastInput, background_tasks: BackgroundTasks):
+    background_tasks.add_task(execute_broadcast, payload)
+    return {"status": "queued"}
 
 if __name__ == "__main__":
     import uvicorn

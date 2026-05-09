@@ -2,7 +2,15 @@
   "permissions": {
     "allow": [
       "Bash(python -c ' *)",
-      "Bash(python -m py_compile main.py logic.py)"
+      "Bash(python -m py_compile main.py logic.py)",
+      "Bash(git add *)",
+      "Bash(git update-index *)",
+      "Bash(git hash-object *)",
+      "Bash(awk '{print $2}')",
+      "PowerShell(Get-Content *)",
+      "Bash(git rm *)",
+      "Bash(git commit -m ' *)",
+      "Bash(git push *)"
     ]
   }
 }
