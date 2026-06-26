@@ -5,8 +5,9 @@ de AppSheet (acciones Add/Edit) en lugar de escribir directo a `bdBayco`, de mod
 conoce el cambio de inmediato y la fila aparece sin que el usuario tenga que sincronizar a mano.
 
 Solo se usa para `bcItems` y `bcItemsLns` (catálogo). El resto de tablas se sigue escribiendo
-por BD. Corre como dueño del app (sin `RunAsUserEmail`) para no chocar con los filtros de
-seguridad de AppSheet.
+por BD. **Imprescindible** pasar `user_settings={"DatabaseID": database_id}`: los filtros de
+seguridad de la app de Bayco se basan en `UserSettings("DatabaseID")`, así que sin él AppSheet
+no "ve" ninguna fila (Edit da 404 y las Refs como UnitID se rechazan).
 
 Variables de entorno (app de Bayco, las mismas de Kaizen-AI sin sufijo _KAIZEN):
 - APPSHEET_APP_ID
@@ -82,12 +83,16 @@ def _is_transient(status):
     return status >= 500 or status == 429
 
 
-def appsheet_mutate(table, action, rows, run_as_user_email=None):
+def appsheet_mutate(table, action, rows, user_settings=None, run_as_user_email=None):
     """Ejecuta una acción Add/Edit sobre una tabla de AppSheet.
 
     Devuelve la lista de filas de la respuesta (puede ir vacía). Lanza AppSheetError si la
     API responde con un error no transitorio o devuelve un campo Error. Reintenta solo ante
     errores transitorios (5xx/429/red).
+
+    `user_settings` (dict) se pasa como `Properties.UserSettings`. Es **imprescindible** para
+    las tablas multi-tenant de Bayco: sin `{"DatabaseID": database_id}` los filtros de
+    seguridad ocultan todas las filas (Edit -> 404, Refs -> "invalid value").
     """
     if not is_configured():
         raise AppSheetError(0, "AppSheet no configurado (falta APPSHEET_APP_ID/APPSHEET_ACCESS_KEY)")
@@ -98,6 +103,8 @@ def appsheet_mutate(table, action, rows, run_as_user_email=None):
     properties = {"Locale": "en-US"}
     if run_as_user_email:
         properties["RunAsUserEmail"] = run_as_user_email
+    if user_settings:
+        properties["UserSettings"] = {k: str(v) for k, v in user_settings.items() if v is not None}
     payload = {
         "Action": action,
         "Properties": properties,

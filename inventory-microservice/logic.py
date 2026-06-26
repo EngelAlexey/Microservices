@@ -13,8 +13,11 @@ import threading
 logger = logging.getLogger(__name__)
 
 
-def _appsheet_write_or_db(db: Session, table: str, action: str, row: dict, db_fallback):
+def _appsheet_write_or_db(db: Session, table: str, action: str, row: dict, db_fallback, database_id: str = None):
     """Escribe la fila vía la API de AppSheet (Add/Edit) para que el cambio aparezca sin sync.
+
+    Pasa `UserSettings={"DatabaseID": database_id}` (imprescindible: los filtros de seguridad
+    de la app de Bayco se basan en él; sin él AppSheet no ve las filas y Edit/Refs fallan).
 
     Si AppSheet no está configurado o la llamada falla, cae a la escritura directa en BD
     (`db_fallback`), de modo que el dato nunca se pierde: aparecerá tras una sync manual,
@@ -22,7 +25,8 @@ def _appsheet_write_or_db(db: Session, table: str, action: str, row: dict, db_fa
     """
     if appsheet_is_configured():
         try:
-            appsheet_mutate(table, action, [row])
+            user_settings = {"DatabaseID": database_id} if database_id else None
+            appsheet_mutate(table, action, [row], user_settings=user_settings)
             return "appsheet"
         except Exception as e:
             db.rollback()
@@ -567,7 +571,7 @@ def create_item_from_url_logic(db: Session, data: dict, image_url: str, database
         def _db_update_item():
             for k, v in changes.items(): setattr(existing, k, v)
             db.commit()
-        _appsheet_write_or_db(db, "bcItems", "Edit", {"ItemID": item_id, **changes}, _db_update_item)
+        _appsheet_write_or_db(db, "bcItems", "Edit", {"ItemID": item_id, **changes}, _db_update_item, database_id)
     else:
         item_id = str(uuid.uuid4()).replace('-', '')[:8].upper()
         it_website = str(data.get("itWebsite"))[:500] if data.get("itWebsite") else ""
@@ -592,7 +596,7 @@ def create_item_from_url_logic(db: Session, data: dict, image_url: str, database
             )
             db.add(new_item)
             db.commit()
-        _appsheet_write_or_db(db, "bcItems", "Add", item_row, _db_add_item)
+        _appsheet_write_or_db(db, "bcItems", "Add", item_row, _db_add_item, database_id)
         action = "inserted"
     ln_title = f"{it_title} {it_model}".strip() if it_model else it_title
     existing_ln = db.query(BcItemLn).filter(BcItemLn.ItemID == item_id, BcItemLn.lnTitle == ln_title[:150], BcItemLn.DatabaseID == database_id).first()
@@ -615,7 +619,7 @@ def create_item_from_url_logic(db: Session, data: dict, image_url: str, database
             )
             db.add(new_ln)
             db.commit()
-        _appsheet_write_or_db(db, "bcItemsLns", "Add", ln_row, _db_add_ln)
+        _appsheet_write_or_db(db, "bcItemsLns", "Add", ln_row, _db_add_ln, database_id)
     else:
         ln_changes = {"lnModifiedBy": "AI_BOT", "lnModifiedAt": now}
         if not existing_ln.lnSpecs and it_model: ln_changes["lnSpecs"] = it_model[:100]
@@ -625,7 +629,7 @@ def create_item_from_url_logic(db: Session, data: dict, image_url: str, database
         def _db_update_ln():
             for k, v in ln_changes.items(): setattr(existing_ln, k, v)
             db.commit()
-        _appsheet_write_or_db(db, "bcItemsLns", "Edit", {"ItemLnID": existing_ln.ItemLnID, **ln_changes}, _db_update_ln)
+        _appsheet_write_or_db(db, "bcItemsLns", "Edit", {"ItemLnID": existing_ln.ItemLnID, **ln_changes}, _db_update_ln, database_id)
     if image_url and image_folder_id:
         img_filename = f"{item_id}.jpg"
         def upload_scraped_image(img_url, filename, folder_id, iid):
