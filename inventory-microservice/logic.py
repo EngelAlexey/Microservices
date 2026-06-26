@@ -529,9 +529,23 @@ def create_item_from_url_logic(db: Session, data: dict, image_url: str, database
     brand_id = None
     if it_brand_name: brand_id = upsert_brand_logic(db, it_brand_name, database_id)
     # itCategory guarda el CategoryID (referencia a utCategories), no el texto libre.
-    category_id = upsert_category_logic(db, it_category_name, database_id) if it_category_name else None
+    # Tolerante a permisos: si el usuario de BD no puede leer/escribir utCategories (p.ej. bayco_api
+    # en producción), se omite el campo en vez de abortar la creación del ítem.
+    category_id = None
+    if it_category_name:
+        try:
+            category_id = upsert_category_logic(db, it_category_name, database_id)
+        except Exception as e:
+            db.rollback()
+            logger.warning(f"No se pudo resolver itCategory (¿permisos en utCategories?): {e}")
     # itUnit/itUnitSymbol se resuelven a un UnitID de bcUnits (crea la unidad si no existe).
-    unit_id = upsert_unit_logic(db, it_unit_name, it_unit_symbol, database_id) if (it_unit_name or it_unit_symbol) else None
+    unit_id = None
+    if it_unit_name or it_unit_symbol:
+        try:
+            unit_id = upsert_unit_logic(db, it_unit_name, it_unit_symbol, database_id)
+        except Exception as e:
+            db.rollback()
+            logger.warning(f"No se pudo resolver UnitID (¿permisos en bcUnits?): {e}")
     existing = None
     if item_id: existing = db.query(BcItem).filter(BcItem.ItemID == item_id).first()
     if not existing:

@@ -230,6 +230,8 @@ async def extract_from_barcode(payload: BarcodePayload, db: Session = Depends(ge
         )
         return {"status": "success", "source_barcode": payload.barcode, "data": result}
     except Exception as e:
+        db.rollback()
+        logger.exception(f"Error en extract-from-barcode (barcode={payload.barcode}, item_id={payload.item_id})")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/webhook/process-movement")
