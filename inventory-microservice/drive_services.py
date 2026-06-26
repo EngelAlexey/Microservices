@@ -4,6 +4,7 @@ import logging
 import functools
 import time
 import re
+import requests
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload, MediaIoBaseUpload
@@ -11,7 +12,21 @@ from googleapiclient.http import MediaIoBaseDownload, MediaIoBaseUpload
 logger = logging.getLogger(__name__)
 
 SCOPES = ['https://www.googleapis.com/auth/drive']
-SERVICE_ACCOUNT_FILE = 'service_account.json'
+
+def _download_via_api_key(file_id):
+    """Fallback de descarga para archivos públicos vía GOOGLE_API_KEY (sin service account).
+    Devuelve (bytes, meta) si tiene éxito, o (None, None) si no hay API key o falla."""
+    api_key = os.getenv("GOOGLE_API_KEY")
+    if not api_key:
+        return None, None
+    url = f"https://www.googleapis.com/drive/v3/files/{file_id}?alt=media&key={api_key}"
+    response = requests.get(url)
+    if response.status_code == 200:
+        # Sin metadata por esta vía; se rellena con valores neutros.
+        meta = {"name": "public_file.pdf", "mimeType": "application/pdf"}
+        return response.content, meta
+    logger.error(f"API Key fallback failed with status {response.status_code}: {response.text}")
+    return None, None
 
 def get_drive_service(impersonate_user: str = None):
     possible_paths = [
@@ -45,6 +60,8 @@ def get_drive_service(impersonate_user: str = None):
         return build('drive', 'v3', credentials=creds, cache_discovery=False)
     except Exception as e:
         logger.error(f"Error building Drive service: {str(e)}")
+        return None
+
 def resolve_file_id(file_id_or_path: str) -> str:
     if not file_id_or_path:
         return file_id_or_path
@@ -118,19 +135,8 @@ def download_with_validation(file_id):
         service = get_drive_service()
         if not service:
             # Fallback for public files using API Key if service account is not available
-            api_key = os.getenv("GOOGLE_API_KEY")
-            if api_key:
-                logger.info(f"Attempting download via API Key fallback for ID: {file_id}")
-                import requests
-                url = f"https://www.googleapis.com/drive/v3/files/{file_id}?alt=media&key={api_key}"
-                response = requests.get(url)
-                if response.status_code == 200:
-                    # We don't have metadata this way easily, so we dummy it
-                    meta = {"name": "public_file.pdf", "mimeType": "application/pdf"}
-                    return response.content, meta
-                else:
-                    logger.error(f"API Key fallback failed with status {response.status_code}: {response.text}")
-            return None, None
+            logger.info(f"Attempting download via API Key fallback for ID: {file_id}")
+            return _download_via_api_key(file_id)
         
         logger.info(f"Downloading file with ID: {file_id}")
         meta = service.files().get(
@@ -156,15 +162,10 @@ def download_with_validation(file_id):
         logger.error(f"Error downloading file {file_id}: {str(e)}")
         # If service account failed with 403/404, try API key fallback one last time
         if "403" in str(e) or "404" in str(e):
-             api_key = os.getenv("GOOGLE_API_KEY")
-             if api_key:
-                logger.info(f"Service account failed. Retrying with API Key for ID: {file_id}")
-                import requests
-                url = f"https://www.googleapis.com/drive/v3/files/{file_id}?alt=media&key={api_key}"
-                response = requests.get(url)
-                if response.status_code == 200:
-                    meta = {"name": "public_file.pdf", "mimeType": "application/pdf"}
-                    return response.content, meta
+            logger.info(f"Service account failed. Retrying with API Key for ID: {file_id}")
+            content, meta = _download_via_api_key(file_id)
+            if content:
+                return content, meta
         return None, None
 
 @functools.lru_cache(maxsize=128)
@@ -196,8 +197,8 @@ def get_folder_path_from_drive(folder_id: str) -> str:
                     drive_name = drive_info.get('name')
                     if drive_name and drive_name != name:
                         path_parts.insert(0, drive_name)
-                except:
-                    pass
+                except Exception as e:
+                    logger.warning(f"No se pudo obtener el nombre de la unidad compartida '{drive_id}': {e}")
                 break
             
             if not parents:
@@ -207,7 +208,8 @@ def get_folder_path_from_drive(folder_id: str) -> str:
         if path_parts:
             return "/".join(path_parts) + "/"
         return ""
-    except:
+    except Exception as e:
+        logger.warning(f"No se pudo construir la ruta del folder '{folder_id}': {e}")
         return ""
 
 def upload_image_to_drive(image_bytes, filename, mime_type, folder_id):
@@ -240,12 +242,13 @@ def upload_image_to_drive(image_bytes, filename, mime_type, folder_id):
                     body={'type': 'anyone', 'role': 'reader'},
                     supportsAllDrives=True
                 ).execute()
-            except:
-                pass
+            except Exception as e:
+                logger.warning(f"No se pudo asignar permiso público al archivo {file_id}: {e}")
 
             return file_id
-            
-        except:
+
+        except Exception as e:
+            logger.warning(f"Fallo al subir imagen '{filename}' a Drive (intento {attempt + 1}/{max_retries}): {e}")
             if attempt < max_retries - 1:
                 time.sleep(2)
             else:

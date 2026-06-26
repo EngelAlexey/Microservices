@@ -1,2 +1,6 @@
 # Configuración local de Claude Code (puede contener secretos en el allowlist)
 .claude/settings.local.json
+
+# Credenciales de Google (service account) — solo deben vivir como secret en Render
+**/service_account.json
+service_account.json

@@ -1,16 +1,50 @@
 import os
 import json
+import logging
 from dotenv import load_dotenv
 
 load_dotenv()
 
-if "GOOGLE_API_KEY" in os.environ:
-    os.environ.pop("GOOGLE_API_KEY")
-
 from google import genai
 from google.genai import types
+from scrape_services import extract_relevant_content
 
+logger = logging.getLogger(__name__)
+
+# genai.Client recibe la api_key explícita; no debe depender de GOOGLE_API_KEY del entorno
+# (esa variable la usa drive_services para el fallback de descarga pública de Drive).
 _client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+
+_GEMINI_MODEL = "gemini-2.5-flash"
+
+
+def _json_config(**overrides):
+    """Config común para las llamadas a Gemini que devuelven JSON."""
+    params = dict(
+        response_mime_type="application/json",
+        temperature=0.1,
+        thinking_config=types.ThinkingConfig(thinking_budget=0),
+    )
+    params.update(overrides)
+    return types.GenerateContentConfig(**params)
+
+
+def _parse_response_json(response):
+    """Limpia las fences ```json y parsea el JSON de la respuesta del modelo."""
+    text = response.text.replace('```json', '').replace('```', '')
+    return json.loads(text)
+
+
+def _attach_usage(response, data):
+    """Adjunta el conteo de tokens a la data si el modelo lo reportó."""
+    usage = response.usage_metadata
+    if usage:
+        data['usage'] = {
+            'prompt_tokens': usage.prompt_token_count,
+            'candidates_tokens': usage.candidates_token_count,
+            'total_tokens': usage.total_token_count
+        }
+    return data
 
 _PROMPT = """Extract data from this Costa Rican invoice PDF. Be extremely precise with financial totals and taxes.
 
@@ -75,29 +109,16 @@ Return JSON:
 def extract_invoice_data(pdf_content_bytes):
     try:
         response = _client.models.generate_content(
-            model='gemini-2.5-flash',
+            model=_GEMINI_MODEL,
             contents=[
                 types.Part.from_bytes(data=pdf_content_bytes, mime_type="application/pdf"),
                 _PROMPT
             ],
-            config=types.GenerateContentConfig(
-                response_mime_type="application/json",
-                temperature=0.1,
-                thinking_config=types.ThinkingConfig(thinking_budget=0),
-            )
+            config=_json_config()
         )
-        text = response.text.replace('```json', '').replace('```', '')
-        data = json.loads(text)
-        usage = response.usage_metadata
-        data['usage'] = {
-            'prompt_tokens': usage.prompt_token_count,
-            'candidates_tokens': usage.candidates_token_count,
-            'total_tokens': usage.total_token_count
-        }
-        return data
+        return _attach_usage(response, _parse_response_json(response))
     except Exception as e:
-        import logging
-        logging.getLogger(__name__).error(f"Error in extract_invoice_data: {str(e)}")
+        logger.error(f"Error in extract_invoice_data: {str(e)}")
         return None
 
 _COMPANY_PROMPT = """Extract the underlying company data from this document, specifically looking for the issuer or client details.
@@ -122,29 +143,16 @@ Return JSON format:
 def extract_company_data(pdf_content_bytes):
     try:
         response = _client.models.generate_content(
-            model='gemini-2.5-flash',
+            model=_GEMINI_MODEL,
             contents=[
                 types.Part.from_bytes(data=pdf_content_bytes, mime_type="application/pdf"),
                 _COMPANY_PROMPT
             ],
-            config=types.GenerateContentConfig(
-                response_mime_type="application/json",
-                temperature=0.1,
-                thinking_config=types.ThinkingConfig(thinking_budget=0),
-            )
+            config=_json_config()
         )
-        text = response.text.replace('```json', '').replace('```', '')
-        data = json.loads(text)
-        usage = response.usage_metadata
-        data['usage'] = {
-            'prompt_tokens': usage.prompt_token_count,
-            'candidates_tokens': usage.candidates_token_count,
-            'total_tokens': usage.total_token_count
-        }
-        return data
+        return _attach_usage(response, _parse_response_json(response))
     except Exception as e:
-        import logging
-        logging.getLogger(__name__).error(f"Error in extract_company_data: {str(e)}")
+        logger.error(f"Error in extract_company_data: {str(e)}")
         return None
 
 _PRODUCT_URL_PROMPT = """You are a product catalog extraction assistant.
@@ -192,31 +200,17 @@ Return JSON:
 
 def extract_product_from_html(html_text: str):
     try:
-        from scrape_services import extract_relevant_content
         relevant = extract_relevant_content(html_text)
         # Fallback al HTML crudo recortado si la limpieza no produjo nada
         trimmed_html = relevant or html_text[:50000]
         response = _client.models.generate_content(
-            model='gemini-2.5-flash',
+            model=_GEMINI_MODEL,
             contents=[trimmed_html, _PRODUCT_URL_PROMPT],
-            config=types.GenerateContentConfig(
-                response_mime_type="application/json",
-                temperature=0.1,
-                thinking_config=types.ThinkingConfig(thinking_budget=0),
-            )
+            config=_json_config()
         )
-        text = response.text.replace('```json', '').replace('```', '')
-        data = json.loads(text)
-        usage = response.usage_metadata
-        data['usage'] = {
-            'prompt_tokens': usage.prompt_token_count,
-            'candidates_tokens': usage.candidates_token_count,
-            'total_tokens': usage.total_token_count
-        }
-        return data
+        return _attach_usage(response, _parse_response_json(response))
     except Exception as e:
-        import logging
-        logging.getLogger(__name__).error(f"Error in extract_product_from_html: {str(e)}")
+        logger.error(f"Error in extract_product_from_html: {str(e)}")
         return None
 
 _PRODUCT_BARCODE_PROMPT = """You are a product catalog extraction assistant for a Costa Rican hardware/retail inventory system.
@@ -311,19 +305,13 @@ def infer_unit_from_text(title: str, model: str):
         return None
     try:
         response = _client.models.generate_content(
-            model='gemini-2.5-flash',
+            model=_GEMINI_MODEL,
             contents=[text_in, _UNIT_INFER_PROMPT],
-            config=types.GenerateContentConfig(
-                response_mime_type="application/json",
-                temperature=0.1,
-                thinking_config=types.ThinkingConfig(thinking_budget=0),
-            )
+            config=_json_config()
         )
-        text = response.text.replace('```json', '').replace('```', '')
-        return json.loads(text)
+        return _parse_response_json(response)
     except Exception as e:
-        import logging
-        logging.getLogger(__name__).error(f"Error in infer_unit_from_text: {str(e)}")
+        logger.error(f"Error in infer_unit_from_text: {str(e)}")
         return None
 
 _SIZE_INFER_PROMPT = """You extract the PHYSICAL DIMENSIONS / SIZE of a Costa Rican hardware/retail product
@@ -348,19 +336,13 @@ def infer_size_from_text(title: str, model: str):
         return None
     try:
         response = _client.models.generate_content(
-            model='gemini-2.5-flash',
+            model=_GEMINI_MODEL,
             contents=[text_in, _SIZE_INFER_PROMPT],
-            config=types.GenerateContentConfig(
-                response_mime_type="application/json",
-                temperature=0.1,
-                thinking_config=types.ThinkingConfig(thinking_budget=0),
-            )
+            config=_json_config()
         )
-        text = response.text.replace('```json', '').replace('```', '')
-        return json.loads(text)
+        return _parse_response_json(response)
     except Exception as e:
-        import logging
-        logging.getLogger(__name__).error(f"Error in infer_size_from_text: {str(e)}")
+        logger.error(f"Error in infer_size_from_text: {str(e)}")
         return None
 
 _CLEAN_TITLE_PROMPT = """You clean the PARENT product name (itTitle) of a Costa Rican hardware/retail catalog item.
@@ -398,19 +380,13 @@ def clean_parent_title(title: str, brand: str = "", size: str = "", model: str =
     )
     try:
         response = _client.models.generate_content(
-            model='gemini-2.5-flash',
+            model=_GEMINI_MODEL,
             contents=[context, _CLEAN_TITLE_PROMPT],
-            config=types.GenerateContentConfig(
-                response_mime_type="application/json",
-                temperature=0.1,
-                thinking_config=types.ThinkingConfig(thinking_budget=0),
-            )
+            config=_json_config()
         )
-        text = response.text.replace('```json', '').replace('```', '')
-        return json.loads(text)
+        return _parse_response_json(response)
     except Exception as e:
-        import logging
-        logging.getLogger(__name__).error(f"Error in clean_parent_title: {str(e)}")
+        logger.error(f"Error in clean_parent_title: {str(e)}")
         return None
 
 def extract_product_from_barcode(barcode: str):
@@ -428,7 +404,7 @@ def extract_product_from_barcode(barcode: str):
         search_tool = types.Tool(google_search=types.GoogleSearch())
         prompt = f"{_PRODUCT_BARCODE_PROMPT}\n\nBARCODE: {barcode}"
         response = _client.models.generate_content(
-            model='gemini-2.5-flash',
+            model=_GEMINI_MODEL,
             contents=[prompt],
             config=types.GenerateContentConfig(
                 tools=[search_tool],
@@ -438,15 +414,7 @@ def extract_product_from_barcode(barcode: str):
         data = _parse_json_object(response.text)
         if not data:
             return None
-        usage = response.usage_metadata
-        if usage:
-            data['usage'] = {
-                'prompt_tokens': usage.prompt_token_count,
-                'candidates_tokens': usage.candidates_token_count,
-                'total_tokens': usage.total_token_count
-            }
-        return data
+        return _attach_usage(response, data)
     except Exception as e:
-        import logging
-        logging.getLogger(__name__).error(f"Error in extract_product_from_barcode: {str(e)}")
+        logger.error(f"Error in extract_product_from_barcode: {str(e)}")
         return None

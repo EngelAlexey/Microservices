@@ -26,7 +26,8 @@ def scrape_product_page(url: str) -> tuple[str, str | None]:
             if img_match:
                 image_url = img_match.group(1)
         return html, image_url
-    except:
+    except Exception as e:
+        logger.warning(f"No se pudo scrapear la página '{url}': {e}")
         return None, None
 
 def extract_relevant_content(html: str, max_chars: int = 40000) -> str:
@@ -76,5 +77,6 @@ def download_image_from_url(image_url: str) -> tuple[bytes | None, str | None]:
         response.raise_for_status()
         content_type = response.headers.get("Content-Type", "image/jpeg")
         return response.content, content_type
-    except:
+    except Exception as e:
+        logger.warning(f"No se pudo descargar la imagen '{image_url}': {e}")
         return None, None

@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Qué es esto
 
-Microservicio FastAPI (`inventory-microservice`) que actúa como backend de IA y motor de inventario para una app de AppSheet. AppSheet llama a los endpoints `/webhook/*` y `/admin/*`; el servicio digitaliza facturas (PDF) con Gemini, scrapea/resuelve productos, escribe directamente en la base de datos MySQL compartida (`bdBayco` en Cloud SQL) y dispara difusiones por WhatsApp vía BuilderBot.
+Microservicio FastAPI (`inventory-microservice`) que actúa como backend de IA y motor de inventario para una app de AppSheet. AppSheet llama a los endpoints `/webhook/*` y `/admin/*`; el servicio digitaliza facturas (PDF) con Gemini, scrapea/resuelve productos, escribe en la base de datos MySQL compartida (`bdBayco` en Cloud SQL) y dispara difusiones por WhatsApp vía BuilderBot. La mayoría de las escrituras van directo a la BD; **excepción: el catálogo (`bcItems`/`bcItemsLns`) se escribe vía la API de AppSheet** (`appsheet_services.py`) para que el artículo aparezca sin sync manual, con fallback a BD si AppSheet falla.
 
 No hay tests ni linter configurados en el repo.
 
@@ -21,7 +21,7 @@ uvicorn main:app --reload --host 0.0.0.0 --port 10000
 ```
 
 La configuración vive en `.env` (no versionado). Variables usadas en el código:
-`DB_USER`, `DB_PASS`, `DB_HOST`, `DB_PORT`, `DB_NAME`, `GEMINI_API_KEY`, `GOOGLE_API_KEY` (fallback de descarga de Drive para archivos públicos), `SERPER_API_KEY` (búsqueda de imágenes), `BUILDERBOT_URL` + `BUILDERBOT_API_KEY` (WhatsApp), `DEFAULT_IMAGE_FOLDER_ID`, `PORT`.
+`DB_USER`, `DB_PASS`, `DB_HOST`, `DB_PORT`, `DB_NAME`, `GEMINI_API_KEY`, `GOOGLE_API_KEY` (fallback de descarga de Drive para archivos públicos), `BUILDERBOT_URL` + `BUILDERBOT_API_KEY` (WhatsApp), `DEFAULT_IMAGE_FOLDER_ID`, `PORT`, `DEV_RELOAD` (opcional: activa la recarga automática de uvicorn al correr `python main.py`), `APPSHEET_APP_ID` + `APPSHEET_ACCESS_KEY` + `APPSHEET_REGION` (API de AppSheet de la app de Bayco; ver `appsheet_services.py`).
 
 ## Credenciales y secretos por ruta
 
@@ -37,7 +37,7 @@ Flujo en capas, separando IO externo de la lógica de negocio:
 - **`ai_services.py`** — Cliente de Gemini (`gemini-2.5-flash`). Cada función envuelve un prompt distinto: facturas CR (`extract_invoice_data`), datos de empresa (`extract_company_data`), producto desde HTML (`extract_product_from_html`), producto desde código de barras con Google Search grounding (`extract_product_from_barcode`). Importante: el código de barras usa la herramienta `google_search`, que es **incompatible** con `response_mime_type=application/json`, por eso parsea el JSON manualmente (`_parse_json_object`).
 - **`scrape_services.py`** — Descarga páginas de producto con `requests` y reduce el HTML a JSON-LD + texto del body antes de mandarlo a la IA (`extract_relevant_content`). Nota: no funciona con sitios SPA que renderizan por JS (ver memoria de El Lagar).
 - **`drive_services.py`** — Resuelve IDs/paths/URLs de Google Drive, descarga PDFs y sube imágenes (con permiso público `anyone:reader`). Reintentos con backoff exponencial.
-- **`image_services.py`** — Busca imágenes de producto vía Serper (Google Images API).
+- **`appsheet_services.py`** — Cliente mínimo de la API de AppSheet (port de `lib/appsheet/client.ts` de Kaizen-AI). `appsheet_mutate(table, action, rows)` ejecuta acciones `Add`/`Edit` corriendo como dueño del app (sin `RunAsUserEmail`), normaliza fechas a `MM/DD/YYYY` (Locale en-US) y reintenta ante errores transitorios. Se usa **solo para `bcItems` y `bcItemsLns`**: escribir el catálogo vía AppSheet (en vez de directo a la BD) hace que AppSheet conozca el cambio de inmediato y el artículo aparezca **sin sync manual**. El microservicio genera los IDs (`ItemID`/`ItemLnID`) y los pasa en el `Add`.
 - **`logic.py`** — **Toda la lógica de negocio y escritura a base de datos.** Es el archivo más grande y crítico.
 - **`models.py`** — Modelos SQLAlchemy. **No usa migraciones**: las tablas ya existen en `bdBayco` (las administra AppSheet). Los modelos deben coincidir con el esquema real, no al revés.
 - **`database.py`** — Engine SQLAlchemy (MySQL/pymysql) con pool y SSL. `get_db()` es la dependencia FastAPI; `SessionLocal()` se usa directo en hilos/tareas de fondo.

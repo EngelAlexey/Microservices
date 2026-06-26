@@ -1,6 +1,5 @@
 import re
 import logging
-import time
 import asyncio
 import os
 from concurrent.futures import ThreadPoolExecutor
@@ -20,6 +19,16 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI()
 _executor = ThreadPoolExecutor(max_workers=4)
+
+
+@app.on_event("shutdown")
+def _shutdown_executor():
+    _executor.shutdown(wait=False)
+
+
+def _resolve_image_folder(value: str | None) -> str | None:
+    """Carpeta de Drive para imágenes: la del payload o, si no viene, el default global."""
+    return value or os.environ.get("DEFAULT_IMAGE_FOLDER_ID")
 
 class FilePayload(BaseModel):
     file_id: str | None = None
@@ -170,7 +179,7 @@ async def process_drive_file(payload: FilePayload, db: Session = Depends(get_db)
 @app.post("/webhook/create-movements")
 async def create_movements(payload: MovementPayload, db: Session = Depends(get_db)):
     try:
-        img_folder = payload.image_folder_id or os.environ.get("DEFAULT_IMAGE_FOLDER_ID")
+        img_folder = _resolve_image_folder(payload.image_folder_id)
         doc_id = payload.document_id or payload.DocumentID
         db_id = payload.database_id or payload.DatabaseID
         
@@ -206,7 +215,7 @@ async def extract_from_url(payload: UrlPayload, db: Session = Depends(get_db)):
     if not data:
         raise HTTPException(status_code=422, detail="Fallo extracción IA")
     try:
-        img_folder = payload.image_folder_id or os.environ.get("DEFAULT_IMAGE_FOLDER_ID")
+        img_folder = _resolve_image_folder(payload.image_folder_id)
         result = create_item_from_url_logic(
             db, data, image_url=image_url, database_id=payload.database_id,
             image_folder_id=img_folder, item_id=payload.item_id
@@ -240,7 +249,7 @@ def _process_barcode_bg(barcode: str, database_id: str, image_folder_id: str | N
 async def extract_from_barcode(payload: BarcodePayload, background_tasks: BackgroundTasks):
     # Respondemos al instante y procesamos en segundo plano: la resolución del código con Gemini
     # tarda ~100s y AppSheet/Apps Script cancela si espera síncronamente. El ítem aparece tras la sync.
-    img_folder = payload.image_folder_id or os.environ.get("DEFAULT_IMAGE_FOLDER_ID")
+    img_folder = _resolve_image_folder(payload.image_folder_id)
     background_tasks.add_task(_process_barcode_bg, payload.barcode, payload.database_id, img_folder, payload.item_id)
     return {"status": "queued", "source_barcode": payload.barcode}
 
@@ -337,8 +346,8 @@ async def execute_broadcast(payload: BroadcastInput):
     numbers_raw = payload.targetNumbers.split(",")
     numbers = [re.sub(r'\D', '', num) for num in numbers_raw if num.strip()]
     
-    url = os.environ.get("BUILDERBOT_URL", os.environ.get("BUILDERBOT_URL"))
-    api_key = os.environ.get("BUILDERBOT_API_KEY", os.environ.get("BUILDERBOT_API_KEY"))
+    url = os.environ.get("BUILDERBOT_URL")
+    api_key = os.environ.get("BUILDERBOT_API_KEY")
     
     headers = {
         "Content-Type": "application/json",
@@ -374,4 +383,9 @@ async def trigger_broadcast(payload: BroadcastInput, background_tasks: Backgroun
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("main:app", host="0.0.0.0", port=int(os.environ.get("PORT", 10000)), reload=True)
+    uvicorn.run(
+        "main:app",
+        host="0.0.0.0",
+        port=int(os.environ.get("PORT", 10000)),
+        reload=bool(os.environ.get("DEV_RELOAD")),
+    )

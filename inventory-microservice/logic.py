@@ -6,11 +6,29 @@ from datetime import datetime, timedelta, timezone
 import logging
 import re
 from sqlalchemy import func, text, or_
-from image_services import search_product_image
 from drive_services import upload_image_to_drive, get_folder_path_from_drive
+from appsheet_services import appsheet_mutate, is_configured as appsheet_is_configured
 import threading
 
 logger = logging.getLogger(__name__)
+
+
+def _appsheet_write_or_db(db: Session, table: str, action: str, row: dict, db_fallback):
+    """Escribe la fila vía la API de AppSheet (Add/Edit) para que el cambio aparezca sin sync.
+
+    Si AppSheet no está configurado o la llamada falla, cae a la escritura directa en BD
+    (`db_fallback`), de modo que el dato nunca se pierde: aparecerá tras una sync manual,
+    igual que en el comportamiento original. Devuelve "appsheet" o "db" según el origen.
+    """
+    if appsheet_is_configured():
+        try:
+            appsheet_mutate(table, action, [row])
+            return "appsheet"
+        except Exception as e:
+            db.rollback()
+            logger.warning(f"AppSheet {action} en {table} falló; cae a escritura directa en BD: {e}")
+    db_fallback()
+    return "db"
 
 def safe_float(val):
     if val is None or val == "":
@@ -33,28 +51,6 @@ def strip_html_tags(text):
 
 def get_now_ca():
     return datetime.now(timezone(timedelta(hours=-6))).replace(tzinfo=None)
-
-def fetch_and_upload_image_task(query: str, filename: str, folder_id: str, item_id: str = None):
-    try:
-        img_bytes, img_type, _ = search_product_image(query)
-        if img_bytes:
-            drive_file_id = upload_image_to_drive(img_bytes, filename, img_type, folder_id)
-            if drive_file_id and item_id:
-                from database import SessionLocal
-                db = SessionLocal()
-                try:
-                    item = db.query(BcItem).filter(BcItem.ItemID == item_id).first()
-                    if item:
-                        if not item.DriveID or item.itImage == filename:
-                            item.DriveID = drive_file_id
-                            item.itImage = filename
-                            db.commit()
-                except:
-                    pass
-                finally:
-                    db.close()
-    except:
-        pass
 
 def _load_product_catalog(db: Session, database_id: str):
     all_items = db.query(BcItemLn.ItemLnID, BcItemLn.lnCode, BcItemLn.lnTitle, BcItem.itTitle, BcItem.ItemID, BcItem.DriveID)\
@@ -176,10 +172,11 @@ def insert_document_logic(db: Session, data: dict, source_file_id: str, appsheet
         doc_obj = FnDocument(DocumentID=doc_id)
         db.add(doc_obj)
     now = get_now_ca()
+    doc_date_str = header.get("doDate")
     try:
-        doc_date_str = header.get("doDate")
         doc_date = datetime.strptime(doc_date_str, "%Y-%m-%d").date() if doc_date_str else now.date()
-    except:
+    except (ValueError, TypeError):
+        logger.warning(f"Fecha de documento inválida '{doc_date_str}'; se usa la fecha actual.")
         doc_date = now.date()
     doc_obj.doCreatedAt = now
     doc_obj.doCreatedBy = "AI_BOT"
@@ -430,7 +427,7 @@ def upsert_company_from_invoice_logic(db: Session, data: dict, source_file_id: s
             if extracted_legal: raw_name = extracted_legal
             if extracted_fantasy and not raw_title: raw_title = extracted_fantasy
     final_name = raw_name or raw_title
-    final_title = raw_title or raw_name or raw_title
+    final_title = raw_title or raw_name
     if final_name: company_obj.cpName = final_name[:200]
     if final_title: company_obj.cpTitle = final_title[:150]
     if data.get("cpCategory"): company_obj.cpCategory = str(data.get("cpCategory"))[:100]
@@ -553,54 +550,82 @@ def create_item_from_url_logic(db: Session, data: dict, image_url: str, database
     action = "found"
     if existing:
         item_id = existing.ItemID
-        if it_title: existing.itTitle = it_title
-        existing.itStatus = True
-        existing.itModifiedBy = "AI_BOT"
-        existing.itModifiedAt = now
-        if brand_id and not existing.itBrand: existing.itBrand = brand_id
-        if it_description and not existing.itDescription: existing.itDescription = it_description
-        if category_id and not existing.itCategory: existing.itCategory = category_id
-        if it_subcategory and not existing.itSubcategory: existing.itSubcategory = it_subcategory
-        if it_model and not existing.itModel: existing.itModel = it_model
-        if it_size and not existing.itSize: existing.itSize = it_size
-        if unit_id and not existing.UnitID: existing.UnitID = unit_id
-        if it_observations and not existing.itObservations: existing.itObservations = it_observations
-        if data.get("itWebsite") and not existing.itWebsite: existing.itWebsite = str(data.get("itWebsite"))[:500]
-        if image_url and not existing.itImage: existing.itImage = image_url[:255]
-        db.commit()
+        # Upsert parcial: solo rellenamos campos vacíos (igual que antes). Calculamos el set de
+        # cambios y lo aplicamos vía AppSheet (Edit); el fallback a BD los escribe en el ORM.
+        changes = {"itStatus": True, "itModifiedBy": "AI_BOT", "itModifiedAt": now}
+        if it_title: changes["itTitle"] = it_title
+        if brand_id and not existing.itBrand: changes["itBrand"] = brand_id
+        if it_description and not existing.itDescription: changes["itDescription"] = it_description
+        if category_id and not existing.itCategory: changes["itCategory"] = category_id
+        if it_subcategory and not existing.itSubcategory: changes["itSubcategory"] = it_subcategory
+        if it_model and not existing.itModel: changes["itModel"] = it_model
+        if it_size and not existing.itSize: changes["itSize"] = it_size
+        if unit_id and not existing.UnitID: changes["UnitID"] = unit_id
+        if it_observations and not existing.itObservations: changes["itObservations"] = it_observations
+        if data.get("itWebsite") and not existing.itWebsite: changes["itWebsite"] = str(data.get("itWebsite"))[:500]
+        if image_url and not existing.itImage: changes["itImage"] = image_url[:255]
+        def _db_update_item():
+            for k, v in changes.items(): setattr(existing, k, v)
+            db.commit()
+        _appsheet_write_or_db(db, "bcItems", "Edit", {"ItemID": item_id, **changes}, _db_update_item)
     else:
         item_id = str(uuid.uuid4()).replace('-', '')[:8].upper()
-        new_item = BcItem(
-            ItemID=item_id, DatabaseID=database_id, itTitle=it_title, itDescription=it_description or "",
-            itBrand=brand_id, itCategory=category_id or "", itSubcategory=it_subcategory or "", itModel=it_model or "",
-            itSize=it_size or "", UnitID=unit_id, itCatalog=False,
-            itWebsite=str(data.get("itWebsite"))[:500] if data.get("itWebsite") else "", itObservations=it_observations or "",
-            CabysID="", itStatus=True, itImage=image_url[:255] if image_url else None,
-            itCreatedBy="AI_BOT", itCreatedAt=now, itModifiedBy="AI_BOT", itModifiedAt=now, Bot="Importado desde URL"
-        )
-        db.add(new_item)
-        db.commit()
+        it_website = str(data.get("itWebsite"))[:500] if data.get("itWebsite") else ""
+        item_row = {
+            "ItemID": item_id, "DatabaseID": database_id, "itTitle": it_title,
+            "itDescription": it_description or "", "itBrand": brand_id or "", "itCategory": category_id or "",
+            "itSubcategory": it_subcategory or "", "itModel": it_model or "", "itSize": it_size or "",
+            "UnitID": unit_id or "", "itCatalog": False, "itWebsite": it_website,
+            "itObservations": it_observations or "", "CabysID": "", "itStatus": True,
+            "itImage": image_url[:255] if image_url else "",
+            "itCreatedBy": "AI_BOT", "itCreatedAt": now, "itModifiedBy": "AI_BOT", "itModifiedAt": now,
+            "Bot": "Importado desde URL",
+        }
+        def _db_add_item():
+            new_item = BcItem(
+                ItemID=item_id, DatabaseID=database_id, itTitle=it_title, itDescription=it_description or "",
+                itBrand=brand_id, itCategory=category_id or "", itSubcategory=it_subcategory or "", itModel=it_model or "",
+                itSize=it_size or "", UnitID=unit_id, itCatalog=False,
+                itWebsite=it_website, itObservations=it_observations or "",
+                CabysID="", itStatus=True, itImage=image_url[:255] if image_url else None,
+                itCreatedBy="AI_BOT", itCreatedAt=now, itModifiedBy="AI_BOT", itModifiedAt=now, Bot="Importado desde URL"
+            )
+            db.add(new_item)
+            db.commit()
+        _appsheet_write_or_db(db, "bcItems", "Add", item_row, _db_add_item)
         action = "inserted"
     ln_title = f"{it_title} {it_model}".strip() if it_model else it_title
     existing_ln = db.query(BcItemLn).filter(BcItemLn.ItemID == item_id, BcItemLn.lnTitle == ln_title[:150], BcItemLn.DatabaseID == database_id).first()
     if not existing_ln:
         ln_id = str(uuid.uuid4()).replace('-', '')[:8].upper()
-        new_ln = BcItemLn(
-            ItemLnID=ln_id, ItemID=item_id, DatabaseID=database_id, lnCode=ln_id, lnTitle=ln_title[:150],
-            lnSpecs=it_model[:100] if it_model else "", lnBarcode=(barcode or "")[:50], lnPresentation="", UnitID=unit_id or "UND", inCertification="",
-            lnWeight="", lnQuantity=0, lnAvailable=0, lnFeatures=brand_id or "", lnObservations="", lnStatus=True,
-            lnCreatedBy="AI_BOT", lnCreatedAt=now, lnModifiedBy="AI_BOT", lnModifiedAt=now, Bot="ADDED"
-        )
-        db.add(new_ln)
-        db.commit()
+        ln_row = {
+            "ItemLnID": ln_id, "ItemID": item_id, "DatabaseID": database_id, "lnCode": ln_id,
+            "lnTitle": ln_title[:150], "lnSpecs": it_model[:100] if it_model else "",
+            "lnBarcode": (barcode or "")[:50], "lnPresentation": "", "UnitID": unit_id or "UND",
+            "inCertification": "", "lnWeight": "", "lnQuantity": 0, "lnAvailable": 0,
+            "lnFeatures": brand_id or "", "lnObservations": "", "lnStatus": True,
+            "lnCreatedBy": "AI_BOT", "lnCreatedAt": now, "lnModifiedBy": "AI_BOT", "lnModifiedAt": now, "Bot": "ADDED",
+        }
+        def _db_add_ln():
+            new_ln = BcItemLn(
+                ItemLnID=ln_id, ItemID=item_id, DatabaseID=database_id, lnCode=ln_id, lnTitle=ln_title[:150],
+                lnSpecs=it_model[:100] if it_model else "", lnBarcode=(barcode or "")[:50], lnPresentation="", UnitID=unit_id or "UND", inCertification="",
+                lnWeight="", lnQuantity=0, lnAvailable=0, lnFeatures=brand_id or "", lnObservations="", lnStatus=True,
+                lnCreatedBy="AI_BOT", lnCreatedAt=now, lnModifiedBy="AI_BOT", lnModifiedAt=now, Bot="ADDED"
+            )
+            db.add(new_ln)
+            db.commit()
+        _appsheet_write_or_db(db, "bcItemsLns", "Add", ln_row, _db_add_ln)
     else:
-        existing_ln.lnModifiedBy = "AI_BOT"
-        existing_ln.lnModifiedAt = now
-        if not existing_ln.lnSpecs and it_model: existing_ln.lnSpecs = it_model[:100]
-        if barcode and not existing_ln.lnBarcode: existing_ln.lnBarcode = barcode[:50]
-        if unit_id and (not existing_ln.UnitID or existing_ln.UnitID == "UND"): existing_ln.UnitID = unit_id
-        if brand_id: existing_ln.lnFeatures = brand_id
-        db.commit()
+        ln_changes = {"lnModifiedBy": "AI_BOT", "lnModifiedAt": now}
+        if not existing_ln.lnSpecs and it_model: ln_changes["lnSpecs"] = it_model[:100]
+        if barcode and not existing_ln.lnBarcode: ln_changes["lnBarcode"] = barcode[:50]
+        if unit_id and (not existing_ln.UnitID or existing_ln.UnitID == "UND"): ln_changes["UnitID"] = unit_id
+        if brand_id: ln_changes["lnFeatures"] = brand_id
+        def _db_update_ln():
+            for k, v in ln_changes.items(): setattr(existing_ln, k, v)
+            db.commit()
+        _appsheet_write_or_db(db, "bcItemsLns", "Edit", {"ItemLnID": existing_ln.ItemLnID, **ln_changes}, _db_update_ln)
     if image_url and image_folder_id:
         img_filename = f"{item_id}.jpg"
         def upload_scraped_image(img_url, filename, folder_id, iid):
