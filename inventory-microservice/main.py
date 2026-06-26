@@ -10,8 +10,8 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from database import get_db, SessionLocal
 from models import FnDocument 
-from ai_services import extract_invoice_data, extract_company_data, extract_product_from_html
-from logic import insert_document_logic, upsert_company_from_invoice_logic, create_item_from_url_logic, create_inventory_movements_logic, process_single_movement_logic, backfill_movement_costs_logic, sync_rfq_lines_logic
+from ai_services import extract_invoice_data, extract_company_data, extract_product_from_html, extract_product_from_barcode
+from logic import insert_document_logic, upsert_company_from_invoice_logic, create_item_from_url_logic, create_inventory_movements_logic, process_single_movement_logic, backfill_movement_costs_logic, sync_rfq_lines_logic, backfill_categories_logic, backfill_units_logic, backfill_sizes_logic, backfill_clean_titles_logic
 from drive_services import download_with_validation, resolve_file_id
 from scrape_services import scrape_product_page
 
@@ -41,6 +41,12 @@ class UrlPayload(BaseModel):
     image_folder_id: str | None = None
     item_id: str | None = None
 
+class BarcodePayload(BaseModel):
+    barcode: str
+    database_id: str
+    image_folder_id: str | None = None
+    item_id: str | None = None
+
 class SingleMovementPayload(BaseModel):
     movement_id: str
     database_id: str
@@ -57,6 +63,25 @@ class SingleMovementPayload(BaseModel):
 
 class BackfillPayload(BaseModel):
     database_id: str
+    limit: int | None = None
+
+class BackfillCategoriesPayload(BaseModel):
+    database_id: str
+    dry_run: bool | None = False
+
+class BackfillUnitsPayload(BaseModel):
+    database_id: str
+    dry_run: bool | None = False
+    limit: int | None = None
+
+class BackfillSizesPayload(BaseModel):
+    database_id: str
+    dry_run: bool | None = False
+    limit: int | None = None
+
+class CleanTitlesPayload(BaseModel):
+    database_id: str
+    dry_run: bool | None = False
     limit: int | None = None
 
 class SyncRFQLinesPayload(BaseModel):
@@ -190,6 +215,23 @@ async def extract_from_url(payload: UrlPayload, db: Session = Depends(get_db)):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.post("/webhook/extract-from-barcode")
+async def extract_from_barcode(payload: BarcodePayload, db: Session = Depends(get_db)):
+    loop = asyncio.get_event_loop()
+    data = await loop.run_in_executor(_executor, extract_product_from_barcode, payload.barcode)
+    if not data or not str(data.get("itTitle") or "").strip():
+        raise HTTPException(status_code=422, detail="No se encontró información para este código de barras")
+    try:
+        img_folder = payload.image_folder_id or os.environ.get("DEFAULT_IMAGE_FOLDER_ID")
+        image_url = data.get("image_url")
+        result = create_item_from_url_logic(
+            db, data, image_url=image_url, database_id=payload.database_id,
+            image_folder_id=img_folder, item_id=payload.item_id, barcode=payload.barcode
+        )
+        return {"status": "success", "source_barcode": payload.barcode, "data": result}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.post("/webhook/process-movement")
 async def process_movement_endpoint(payload: SingleMovementPayload, db: Session = Depends(get_db)):
     try:
@@ -212,6 +254,62 @@ async def backfill_costs(payload: BackfillPayload, db: Session = Depends(get_db)
         return {"status": "success", "data": result}
     except Exception as e:
         logger.error(f"Error en backfill de costos: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/admin/backfill-categories")
+async def backfill_categories(payload: BackfillCategoriesPayload, db: Session = Depends(get_db)):
+    """
+    Herramienta de un solo uso: convierte itCategory de texto libre histórico a CategoryID
+    (referencia a utCategories) para la base de datos indicada. NO es parte de la rutina.
+    Usar dry_run=true para previsualizar.
+    """
+    try:
+        result = backfill_categories_logic(db, payload.database_id, dry_run=bool(payload.dry_run))
+        return {"status": "success", "data": result}
+    except Exception as e:
+        logger.error(f"Error en backfill de categorías: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/admin/backfill-units")
+async def backfill_units(payload: BackfillUnitsPayload, db: Session = Depends(get_db)):
+    """
+    Herramienta de un solo uso: rellena UnitID vacío en bcItems (y sus variantes) infiriendo
+    la unidad con IA desde itTitle/itModel. NO es parte de la rutina. Usar dry_run=true para
+    previsualizar y limit para acotar.
+    """
+    try:
+        result = backfill_units_logic(db, payload.database_id, dry_run=bool(payload.dry_run), limit=payload.limit)
+        return {"status": "success", "data": result}
+    except Exception as e:
+        logger.error(f"Error en backfill de unidades: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/admin/backfill-sizes")
+async def backfill_sizes(payload: BackfillSizesPayload, db: Session = Depends(get_db)):
+    """
+    Herramienta de un solo uso: rellena itSize (Dimensión) vacío en bcItems extrayendo las medidas
+    físicas con IA desde itTitle/itModel. Los productos sin medidas se saltan. NO es parte de la rutina.
+    Usar dry_run=true para previsualizar y limit para acotar.
+    """
+    try:
+        result = backfill_sizes_logic(db, payload.database_id, dry_run=bool(payload.dry_run), limit=payload.limit)
+        return {"status": "success", "data": result}
+    except Exception as e:
+        logger.error(f"Error en backfill de dimensiones: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/admin/clean-titles")
+async def clean_titles(payload: CleanTitlesPayload, db: Session = Depends(get_db)):
+    """
+    Herramienta de un solo uso: limpia itTitle dejando el nombre genérico del padre (quita dimensión,
+    marca, presentación y color de variante con IA). NO fusiona duplicados. NO es parte de la rutina.
+    Usar dry_run=true para previsualizar.
+    """
+    try:
+        result = backfill_clean_titles_logic(db, payload.database_id, dry_run=bool(payload.dry_run), limit=payload.limit)
+        return {"status": "success", "data": result}
+    except Exception as e:
+        logger.error(f"Error en limpieza de títulos: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/webhook/sync-rfq-lines")

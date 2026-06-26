@@ -286,6 +286,133 @@ def _parse_json_object(raw: str):
     return None
 
 
+_UNIT_INFER_PROMPT = """You classify the UNIT OF MEASURE used to SELL/COUNT a Costa Rican hardware/retail product, given its name and variant text.
+
+Return the SELLING unit, not a physical dimension. Most discrete products are sold per piece -> use 'Unidad' / 'Un'.
+Use a more specific unit ONLY when the product is clearly sold that way:
+- Liquids / paint: 'Galón'/'Gal', 'Litro'/'L', 'Cubeta'/'Cub'
+- Bagged / bulk: 'Saco'/'Saco', 'Bolsa'/'Bolsa', 'Kilogramo'/'kg'
+- Packaged sets: 'Caja'/'Cj'
+- Sold by length: 'Metro'/'m', 'Metro Cúbico'/'m3'
+- Sheets / boards: 'Lámina'/'Lám', 'Hoja'/'Hoja'
+- Rolls: 'Rollo'/'Rollo'
+A measure like '3.05 m' or '1.82 X 2.44 m' inside the variant text is usually a DIMENSION, not the selling unit;
+default to 'Unidad' unless the product is genuinely sold by that measure (e.g. cable/rope by the meter).
+When in doubt, return 'Unidad'/'Un'.
+
+Return ONLY a JSON object (no markdown fences):
+{"itUnit": "string", "itUnitSymbol": "string"}"""
+
+def infer_unit_from_text(title: str, model: str):
+    """Infiere la unidad de venta (itUnit/itUnitSymbol) a partir del nombre y la variante
+    que ya están en la base de datos, sin re-scrapear. Devuelve None si no hay texto."""
+    text_in = f"NAME: {title or ''}\nVARIANT: {model or ''}".strip()
+    if not (title or model):
+        return None
+    try:
+        response = _client.models.generate_content(
+            model='gemini-2.5-flash',
+            contents=[text_in, _UNIT_INFER_PROMPT],
+            config=types.GenerateContentConfig(
+                response_mime_type="application/json",
+                temperature=0.1,
+                thinking_config=types.ThinkingConfig(thinking_budget=0),
+            )
+        )
+        text = response.text.replace('```json', '').replace('```', '')
+        return json.loads(text)
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).error(f"Error in infer_unit_from_text: {str(e)}")
+        return None
+
+_SIZE_INFER_PROMPT = """You extract the PHYSICAL DIMENSIONS / SIZE of a Costa Rican hardware/retail product
+from its name and variant text, and return it as free text (the value for the 'Dimensión' field).
+
+Extract ONLY measurable size data: thickness, length, width, height, diameter, gauge, volume, weight, area.
+Valid examples: '2.5 mm 1.82 X 2.44 m', '35 mm', '1/2" A 3/8"', '1 X 1" x 3.05 m Calibre #25', '3.8 L', '50 kg'.
+
+Rules:
+1. Extract ONLY genuine physical measurements. DO NOT include brand, color, material, model name, or product type
+   (e.g. from '35 mm Caoba' return '35 mm'; from '3.8 L Bone Olympus' return '3.8 L').
+2. Keep the original units/notation as written (mm, cm, m, ", L, kg, Calibre, etc.).
+3. If the text has NO physical dimension/size, return null. NEVER invent or guess measurements.
+
+Return ONLY a JSON object (no markdown fences): {"itSize": "string or null"}"""
+
+def infer_size_from_text(title: str, model: str):
+    """Extrae la dimensión física (itSize) a partir del nombre y la variante que ya están en la BD,
+    sin re-scrapear. Devuelve {'itSize': None} cuando el producto no tiene medidas (se debe saltar)."""
+    text_in = f"NAME: {title or ''}\nVARIANT: {model or ''}".strip()
+    if not (title or model):
+        return None
+    try:
+        response = _client.models.generate_content(
+            model='gemini-2.5-flash',
+            contents=[text_in, _SIZE_INFER_PROMPT],
+            config=types.GenerateContentConfig(
+                response_mime_type="application/json",
+                temperature=0.1,
+                thinking_config=types.ThinkingConfig(thinking_budget=0),
+            )
+        )
+        text = response.text.replace('```json', '').replace('```', '')
+        return json.loads(text)
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).error(f"Error in infer_size_from_text: {str(e)}")
+        return None
+
+_CLEAN_TITLE_PROMPT = """You clean the PARENT product name (itTitle) of a Costa Rican hardware/retail catalog item.
+The parent name must be the GENERIC, short product name. The specific details already live in other fields
+(brand, dimension/size, variant/model), so they must be REMOVED from the name to avoid duplication.
+
+REMOVE from the name:
+- Physical measurements / dimensions: '3 mm', '1.22 x 10 m', '60 X 45 cm', '5 L', '50 kg', '1/2"', 'Calibre #25', etc.
+- The brand name.
+- Quantities / presentation: '2 Piezas', '10 Piezas', '50 Unidades', 'Galon', 'Litro', etc.
+- Color / finish / material that only distinguishes a variant: 'Gris', 'Caoba', 'Cedro Natural', 'Blanco',
+  'Negro', 'Hierro Negro', 'Satin', 'Miel', 'Transparente', 'Bone', etc.
+
+KEEP:
+- The base product name and core product-line / type codes that identify the product family (e.g. 'A-3', 'AP10').
+
+Example: 'Aislante Termico A-3 3 mm 1.22 x 10 m Prodex' -> 'Aislante Termico A-3'
+
+You are given the current name plus the values stored in the other fields (use them as hints of what to strip).
+Return the cleaned generic name. If it is already clean, return it unchanged. Never return an empty string.
+
+Return ONLY a JSON object (no markdown fences): {"itTitle": "string"}"""
+
+def clean_parent_title(title: str, brand: str = "", size: str = "", model: str = ""):
+    """Limpia el nombre del padre (itTitle) dejando el nombre genérico, quitando dimensión, marca,
+    presentación y color/acabado de variante. Devuelve None ante error o título vacío."""
+    title = str(title or "").strip()
+    if not title:
+        return None
+    context = (
+        f"CURRENT NAME: {title}\n"
+        f"BRAND (remove if present): {brand or '-'}\n"
+        f"DIMENSION (remove if present): {size or '-'}\n"
+        f"VARIANT/MODEL (remove if present): {model or '-'}"
+    )
+    try:
+        response = _client.models.generate_content(
+            model='gemini-2.5-flash',
+            contents=[context, _CLEAN_TITLE_PROMPT],
+            config=types.GenerateContentConfig(
+                response_mime_type="application/json",
+                temperature=0.1,
+                thinking_config=types.ThinkingConfig(thinking_budget=0),
+            )
+        )
+        text = response.text.replace('```json', '').replace('```', '')
+        return json.loads(text)
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).error(f"Error in clean_parent_title: {str(e)}")
+        return None
+
 def extract_product_from_barcode(barcode: str):
     """Resuelve un código de barras (EAN/UPC/GTIN) a datos de producto usando Gemini + Google Search.
 

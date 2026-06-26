@@ -5,7 +5,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 import logging
 import re
-from sqlalchemy import func, text
+from sqlalchemy import func, text, or_
 from image_services import search_product_image
 from drive_services import upload_image_to_drive, get_folder_path_from_drive
 import threading
@@ -825,6 +825,234 @@ def backfill_movement_costs_logic(db: Session, database_id: str, limit: int = No
         "price_records_updated": updated_price,
         "price_records_created": created_price,
         "skipped": skipped
+    }
+
+def backfill_units_logic(db: Session, database_id: str, dry_run: bool = False, limit: int = None):
+    """HERRAMIENTA DE UN SOLO USO (no es parte de la rutina).
+
+    Rellena bcItems.UnitID (y la UnitID de sus variantes) cuando está vacío, infiriendo la
+    unidad de venta con IA a partir de itTitle + itModel (sin re-scrapear). Resuelve/crea la
+    unidad en bcUnits vía upsert_unit_logic. Usar dry_run=True para previsualizar las unidades
+    que sugiere la IA sin escribir, y limit=N para acotar la corrida.
+    """
+    from ai_services import infer_unit_from_text
+    database_id = (database_id or "")[:10]
+    q = db.query(BcItem).filter(
+        BcItem.DatabaseID == database_id,
+        BcItem.isDeleted.isnot(True),
+        or_(BcItem.UnitID.is_(None), BcItem.UnitID == "")
+    )
+    if limit:
+        q = q.limit(limit)
+    items = q.all()
+
+    now = get_now_ca()
+    updated = 0
+    skipped = 0
+    preview = []
+    for it in items:
+        data = infer_unit_from_text(it.itTitle, it.itModel)
+        unit_name = str((data or {}).get("itUnit") or "").strip()
+        unit_symbol = str((data or {}).get("itUnitSymbol") or "").strip()
+        if not unit_name and not unit_symbol:
+            skipped += 1
+            continue
+        if dry_run:
+            preview.append({"item": it.ItemID, "title": it.itTitle, "model": it.itModel,
+                            "unit": unit_name, "symbol": unit_symbol})
+            updated += 1
+            continue
+        unit_id = upsert_unit_logic(db, unit_name, unit_symbol, database_id)
+        if not unit_id:
+            skipped += 1
+            continue
+        it.UnitID = unit_id
+        it.itModifiedBy = "AI_BOT"
+        it.itModifiedAt = now
+        for ln in db.query(BcItemLn).filter(BcItemLn.ItemID == it.ItemID,
+                                            BcItemLn.DatabaseID == database_id).all():
+            if not ln.UnitID or ln.UnitID == "UND":
+                ln.UnitID = unit_id
+                ln.lnModifiedBy = "AI_BOT"
+                ln.lnModifiedAt = now
+        updated += 1
+
+    if not dry_run:
+        db.commit()
+    return {
+        "status": "success",
+        "database_id": database_id,
+        "dry_run": dry_run,
+        "candidates": len(items),
+        "updated": updated,
+        "skipped": skipped,
+        "preview": (preview if dry_run else None),
+    }
+
+def backfill_sizes_logic(db: Session, database_id: str, dry_run: bool = False, limit: int = None):
+    """HERRAMIENTA DE UN SOLO USO (no es parte de la rutina).
+
+    Rellena bcItems.itSize (Dimensión) cuando está vacío, extrayendo las medidas físicas con IA
+    a partir de itTitle + itModel (sin re-scrapear). No todos los productos tienen dimensión en su
+    nombre: los que no la tienen se saltan (la IA devuelve null y no se escribe nada).
+    Usar dry_run=True para previsualizar y limit=N para acotar la corrida.
+    """
+    from ai_services import infer_size_from_text
+    database_id = (database_id or "")[:10]
+    q = db.query(BcItem).filter(
+        BcItem.DatabaseID == database_id,
+        BcItem.isDeleted.isnot(True),
+        or_(BcItem.itSize.is_(None), BcItem.itSize == "")
+    )
+    if limit:
+        q = q.limit(limit)
+    items = q.all()
+
+    now = get_now_ca()
+    updated = 0
+    skipped = 0
+    preview = []
+    for it in items:
+        data = infer_size_from_text(it.itTitle, it.itModel)
+        size_val = str((data or {}).get("itSize") or "").strip()
+        if not size_val or size_val.lower() in ("null", "none", "n/a"):
+            skipped += 1
+            continue
+        size_val = size_val[:100]
+        if dry_run:
+            preview.append({"item": it.ItemID, "title": it.itTitle, "model": it.itModel, "size": size_val})
+            updated += 1
+            continue
+        it.itSize = size_val
+        it.itModifiedBy = "AI_BOT"
+        it.itModifiedAt = now
+        updated += 1
+
+    if not dry_run:
+        db.commit()
+    return {
+        "status": "success",
+        "database_id": database_id,
+        "dry_run": dry_run,
+        "candidates": len(items),
+        "updated": updated,
+        "skipped": skipped,
+        "preview": (preview if dry_run else None),
+    }
+
+def backfill_clean_titles_logic(db: Session, database_id: str, dry_run: bool = False, limit: int = None):
+    """HERRAMIENTA DE UN SOLO USO (no es parte de la rutina).
+
+    Limpia bcItems.itTitle dejando el nombre genérico del padre, quitando dimensión, marca,
+    presentación y color/acabado de variante (esos datos ya viven en itSize/itBrand/itModel).
+    NO fusiona padres duplicados; solo limpia el nombre. Devuelve un resumen de qué nombres
+    quedarían duplicados tras la limpieza. Usar dry_run=True para previsualizar.
+    """
+    from ai_services import clean_parent_title
+    database_id = (database_id or "")[:10]
+    brand_map = {
+        b.BrandID: b.brTitle
+        for b in db.query(BcBrand.BrandID, BcBrand.brTitle).filter(BcBrand.DatabaseID == database_id).all()
+    }
+    q = db.query(BcItem).filter(
+        BcItem.DatabaseID == database_id,
+        BcItem.isDeleted.isnot(True)
+    )
+    if limit:
+        q = q.limit(limit)
+    items = q.all()
+
+    now = get_now_ca()
+    changed = 0
+    unchanged = 0
+    preview = []
+    resulting_titles = {}
+    for it in items:
+        brand_name = brand_map.get(it.itBrand, "") if it.itBrand else ""
+        data = clean_parent_title(it.itTitle, brand_name, it.itSize, it.itModel)
+        new_title = str((data or {}).get("itTitle") or "").strip()[:300]
+        if not new_title:
+            new_title = it.itTitle  # nunca vaciar
+        resulting_titles[new_title] = resulting_titles.get(new_title, 0) + 1
+        if new_title == (it.itTitle or "").strip():
+            unchanged += 1
+            continue
+        if dry_run:
+            preview.append({"item": it.ItemID, "old": it.itTitle, "new": new_title})
+        else:
+            it.itTitle = new_title
+            it.itModifiedBy = "AI_BOT"
+            it.itModifiedAt = now
+        changed += 1
+
+    if not dry_run:
+        db.commit()
+
+    duplicates = {t: n for t, n in resulting_titles.items() if n > 1}
+    return {
+        "status": "success",
+        "database_id": database_id,
+        "dry_run": dry_run,
+        "scanned": len(items),
+        "changed": changed,
+        "unchanged": unchanged,
+        "resulting_distinct_titles": len(resulting_titles),
+        "duplicate_titles_after": len(duplicates),
+        "duplicates_detail": duplicates,
+        "preview": (preview if dry_run else None),
+    }
+
+def backfill_categories_logic(db: Session, database_id: str, dry_run: bool = False):
+    """HERRAMIENTA DE UN SOLO USO (no es parte de la rutina).
+
+    Convierte el campo itCategory de bcItems que aún tiene texto libre histórico
+    a un CategoryID de utCategories (resolviendo/creando la categoría). Los items
+    cuyo itCategory ya es un CategoryID válido no se tocan. Usar dry_run=True para
+    previsualizar sin escribir.
+    """
+    database_id = (database_id or "")[:10]
+    existing_ids = {
+        row[0] for row in db.query(UtCategory.CategoryID)
+        .filter(UtCategory.DatabaseID == database_id).all()
+    }
+    items = db.query(BcItem).filter(
+        BcItem.DatabaseID == database_id,
+        BcItem.itCategory.isnot(None),
+        BcItem.itCategory != "",
+        BcItem.isDeleted.isnot(True)
+    ).all()
+
+    now = get_now_ca()
+    converted = 0
+    already_id = 0
+    mapping = {}
+    for it in items:
+        cur = (it.itCategory or "").strip()
+        if not cur or cur in existing_ids:
+            already_id += 1
+            continue
+        if dry_run:
+            mapping[cur] = mapping.get(cur, 0) + 1
+            converted += 1
+            continue
+        cat_id = upsert_category_logic(db, cur, database_id)
+        if cat_id:
+            it.itCategory = cat_id
+            it.itModifiedBy = "AI_BOT"
+            it.itModifiedAt = now
+            existing_ids.add(cat_id)
+            converted += 1
+
+    if not dry_run:
+        db.commit()
+    return {
+        "status": "success",
+        "database_id": database_id,
+        "dry_run": dry_run,
+        "total_with_category": len(items),
+        "already_category_id": already_id,
+        "converted": converted,
+        "distinct_free_text": (mapping if dry_run else None),
     }
 
 def sync_rfq_lines_logic(db: Session, data: dict):
