@@ -1,0 +1,2 @@
+# Configuración local de Claude Code (puede contener secretos en el allowlist)
+.claude/settings.local.json
