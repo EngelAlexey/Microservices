@@ -215,24 +215,34 @@ async def extract_from_url(payload: UrlPayload, db: Session = Depends(get_db)):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.post("/webhook/extract-from-barcode")
-async def extract_from_barcode(payload: BarcodePayload, db: Session = Depends(get_db)):
-    loop = asyncio.get_event_loop()
-    data = await loop.run_in_executor(_executor, extract_product_from_barcode, payload.barcode)
-    if not data or not str(data.get("itTitle") or "").strip():
-        raise HTTPException(status_code=422, detail="No se encontró información para este código de barras")
+def _process_barcode_bg(barcode: str, database_id: str, image_folder_id: str | None, item_id: str | None):
+    """Procesa el código de barras en segundo plano: resuelve con Gemini (lento, ~100s por el
+    grounding de Google Search) y crea/actualiza el ítem. Usa su propia sesión de BD porque la del
+    request ya está cerrada cuando corre el BackgroundTask."""
+    db = SessionLocal()
     try:
-        img_folder = payload.image_folder_id or os.environ.get("DEFAULT_IMAGE_FOLDER_ID")
-        image_url = data.get("image_url")
+        data = extract_product_from_barcode(barcode)
+        if not data or not str(data.get("itTitle") or "").strip():
+            logger.warning(f"extract-from-barcode: sin datos de producto para barcode={barcode}")
+            return
         result = create_item_from_url_logic(
-            db, data, image_url=image_url, database_id=payload.database_id,
-            image_folder_id=img_folder, item_id=payload.item_id, barcode=payload.barcode
+            db, data, image_url=data.get("image_url"), database_id=database_id,
+            image_folder_id=image_folder_id, item_id=item_id, barcode=barcode
         )
-        return {"status": "success", "source_barcode": payload.barcode, "data": result}
-    except Exception as e:
+        logger.info(f"extract-from-barcode: procesado barcode={barcode} -> {result.get('item_id')}")
+    except Exception:
         db.rollback()
-        logger.exception(f"Error en extract-from-barcode (barcode={payload.barcode}, item_id={payload.item_id})")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.exception(f"extract-from-barcode: error procesando barcode={barcode} item_id={item_id}")
+    finally:
+        db.close()
+
+@app.post("/webhook/extract-from-barcode")
+async def extract_from_barcode(payload: BarcodePayload, background_tasks: BackgroundTasks):
+    # Respondemos al instante y procesamos en segundo plano: la resolución del código con Gemini
+    # tarda ~100s y AppSheet/Apps Script cancela si espera síncronamente. El ítem aparece tras la sync.
+    img_folder = payload.image_folder_id or os.environ.get("DEFAULT_IMAGE_FOLDER_ID")
+    background_tasks.add_task(_process_barcode_bg, payload.barcode, payload.database_id, img_folder, payload.item_id)
+    return {"status": "queued", "source_barcode": payload.barcode}
 
 @app.post("/webhook/process-movement")
 async def process_movement_endpoint(payload: SingleMovementPayload, db: Session = Depends(get_db)):
