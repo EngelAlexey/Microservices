@@ -1,5 +1,5 @@
 from sqlalchemy.orm import Session
-from models import BcItem, BcItemLn, FnDocument, FnDocumentLn, IcMovement, IcPrice, DrProject, DrCompany, BcBrand, IcItemsStock
+from models import BcItem, BcItemLn, FnDocument, FnDocumentLn, IcMovement, IcPrice, DrProject, DrCompany, BcBrand, IcItemsStock, UtCategory, BcUnit
 import difflib
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -459,19 +459,79 @@ def upsert_brand_logic(db: Session, brand_name: str, database_id: str):
     db.commit()
     return brand_id
 
-def create_item_from_url_logic(db: Session, data: dict, image_url: str, database_id: str, image_folder_id: str = None, item_id: str = None):
+def upsert_category_logic(db: Session, category_name: str, database_id: str):
+    """Resuelve un nombre de categoría a un CategoryID de utCategories (crea si no existe).
+    Espeja a upsert_brand_logic: itCategory en bcItems guarda el ID, no el texto."""
+    if not category_name:
+        return None
+    category_name = str(category_name).strip()
+    if not category_name:
+        return None
+    database_id = (database_id or "")[:10]
+    cat_obj = db.query(UtCategory).filter(
+        func.lower(UtCategory.ctTitle) == category_name.lower(),
+        UtCategory.DatabaseID == database_id,
+        UtCategory.isDeleted.isnot(True)
+    ).first()
+    if cat_obj:
+        return cat_obj.CategoryID
+    now = get_now_ca()
+    category_id = str(uuid.uuid4()).replace('-', '')[:8]
+    db.add(UtCategory(
+        CategoryID=category_id, DatabaseID=database_id, ctTitle=category_name[:150],
+        ctCreatedby="AI_BOT", ctCreateddate=now, ctModifiedby="AI_BOT", ctModifieddate=now,
+        isDeleted=False
+    ))
+    db.commit()
+    return category_id
+
+def upsert_unit_logic(db: Session, unit_name: str, unit_symbol: str, database_id: str):
+    """Resuelve una unidad de medida a un UnitID de bcUnits (crea si no existe).
+    Hace match por unTitle o unSymbol (case-insensitive) y, si no encuentra, crea la unidad."""
+    unit_name = str(unit_name or "").strip()
+    unit_symbol = str(unit_symbol or "").strip()
+    if not unit_name and not unit_symbol:
+        return None
+    database_id = (database_id or "")[:150]
+    candidates = {v.lower() for v in (unit_name, unit_symbol) if v}
+    units = db.query(BcUnit).filter(
+        BcUnit.DatabaseID == database_id,
+        BcUnit.isDeleted.isnot(True)
+    ).all()
+    for u in units:
+        title = (u.unTitle or "").strip().lower()
+        symbol = (u.unSymbol or "").strip().lower()
+        if (title and title in candidates) or (symbol and symbol in candidates):
+            return u.UnitID
+    unit_id = str(uuid.uuid4()).replace('-', '')[:10].upper()
+    db.add(BcUnit(
+        UnitID=unit_id, DatabaseID=database_id,
+        unTitle=(unit_name or unit_symbol)[:300], unSymbol=(unit_symbol or unit_name)[:300],
+        isDeleted=False
+    ))
+    db.commit()
+    return unit_id
+
+def create_item_from_url_logic(db: Session, data: dict, image_url: str, database_id: str, image_folder_id: str = None, item_id: str = None, barcode: str = None):
     database_id = (database_id or "")[:10]
     it_title = str(data.get("itTitle") or "").strip()[:300]
     it_brand_name = str(data.get("itBrand") or "").strip()
-    it_category = str(data.get("itCategory") or "").strip()[:45]
+    it_category_name = str(data.get("itCategory") or "").strip()
     it_subcategory = str(data.get("itSubcategory") or "").strip()[:45]
     it_model = str(data.get("itModel") or "").strip()[:45]
+    it_size = str(data.get("itSize") or "").strip()[:100]
+    it_unit_name = str(data.get("itUnit") or "").strip()
+    it_unit_symbol = str(data.get("itUnitSymbol") or "").strip()
     it_description = strip_html_tags(data.get("itDescription"))
     it_observations = strip_html_tags(data.get("itObservations"))
     now = get_now_ca()
     if not it_title: return {"status": "error", "reason": "No se pudo extraer el nombre del producto"}
     brand_id = None
     if it_brand_name: brand_id = upsert_brand_logic(db, it_brand_name, database_id)
+    # itCategory guarda el CategoryID (referencia a utCategories), no el texto libre.
+    category_id = upsert_category_logic(db, it_category_name, database_id) if it_category_name else None
+    # itUnit/itUnitSymbol se resuelven a un UnitID de bcUnits (crea la unidad si no existe).
+    unit_id = upsert_unit_logic(db, it_unit_name, it_unit_symbol, database_id) if (it_unit_name or it_unit_symbol) else None
     existing = None
     if item_id: existing = db.query(BcItem).filter(BcItem.ItemID == item_id).first()
     if not existing:
@@ -485,9 +545,11 @@ def create_item_from_url_logic(db: Session, data: dict, image_url: str, database
         existing.itModifiedAt = now
         if brand_id and not existing.itBrand: existing.itBrand = brand_id
         if it_description and not existing.itDescription: existing.itDescription = it_description
-        if it_category and not existing.itCategory: existing.itCategory = it_category
+        if category_id and not existing.itCategory: existing.itCategory = category_id
         if it_subcategory and not existing.itSubcategory: existing.itSubcategory = it_subcategory
         if it_model and not existing.itModel: existing.itModel = it_model
+        if it_size and not existing.itSize: existing.itSize = it_size
+        if unit_id and not existing.UnitID: existing.UnitID = unit_id
         if it_observations and not existing.itObservations: existing.itObservations = it_observations
         if data.get("itWebsite") and not existing.itWebsite: existing.itWebsite = str(data.get("itWebsite"))[:500]
         if image_url and not existing.itImage: existing.itImage = image_url[:255]
@@ -496,7 +558,8 @@ def create_item_from_url_logic(db: Session, data: dict, image_url: str, database
         item_id = str(uuid.uuid4()).replace('-', '')[:8].upper()
         new_item = BcItem(
             ItemID=item_id, DatabaseID=database_id, itTitle=it_title, itDescription=it_description or "",
-            itBrand=brand_id, itCategory=it_category or "", itSubcategory=it_subcategory or "", itModel=it_model or "",
+            itBrand=brand_id, itCategory=category_id or "", itSubcategory=it_subcategory or "", itModel=it_model or "",
+            itSize=it_size or "", UnitID=unit_id, itCatalog=False,
             itWebsite=str(data.get("itWebsite"))[:500] if data.get("itWebsite") else "", itObservations=it_observations or "",
             CabysID="", itStatus=True, itImage=image_url[:255] if image_url else None,
             itCreatedBy="AI_BOT", itCreatedAt=now, itModifiedBy="AI_BOT", itModifiedAt=now, Bot="Importado desde URL"
@@ -510,7 +573,7 @@ def create_item_from_url_logic(db: Session, data: dict, image_url: str, database
         ln_id = str(uuid.uuid4()).replace('-', '')[:8].upper()
         new_ln = BcItemLn(
             ItemLnID=ln_id, ItemID=item_id, DatabaseID=database_id, lnCode=ln_id, lnTitle=ln_title[:150],
-            lnSpecs=it_model[:100] if it_model else "", lnBarcode="", lnPresentation="", UnitID="UND", inCertification="",
+            lnSpecs=it_model[:100] if it_model else "", lnBarcode=(barcode or "")[:50], lnPresentation="", UnitID=unit_id or "UND", inCertification="",
             lnWeight="", lnQuantity=0, lnAvailable=0, lnFeatures=brand_id or "", lnObservations="", lnStatus=True,
             lnCreatedBy="AI_BOT", lnCreatedAt=now, lnModifiedBy="AI_BOT", lnModifiedAt=now, Bot="ADDED"
         )
@@ -520,6 +583,8 @@ def create_item_from_url_logic(db: Session, data: dict, image_url: str, database
         existing_ln.lnModifiedBy = "AI_BOT"
         existing_ln.lnModifiedAt = now
         if not existing_ln.lnSpecs and it_model: existing_ln.lnSpecs = it_model[:100]
+        if barcode and not existing_ln.lnBarcode: existing_ln.lnBarcode = barcode[:50]
+        if unit_id and (not existing_ln.UnitID or existing_ln.UnitID == "UND"): existing_ln.UnitID = unit_id
         if brand_id: existing_ln.lnFeatures = brand_id
         db.commit()
     if image_url and image_folder_id:

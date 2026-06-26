@@ -17,6 +17,7 @@ class BcItem(Base):
     itModel = Column(String(45))
     itWebsite = Column(String(500))
     CabysID = Column(String(20))
+    UnitID = Column(String(10), nullable=True)
     itObservations = Column(Text)
     itStatus = Column(Boolean, default=True)
     itCreatedBy = Column(String(20))
@@ -24,6 +25,7 @@ class BcItem(Base):
     itModifiedBy = Column(String(20))
     itModifiedAt = Column(DateTime, default=datetime.datetime.now)
     itEnabled = Column(Text)
+    itCatalog = Column(Boolean, default=False)
     DriveID = Column(String(100), nullable=True)
     Bot = Column(String(100))
 
@@ -69,6 +71,29 @@ class BcItemLn(Base):
     lnModifiedBy = Column(String(20))
     lnModifiedAt = Column(DateTime, default=datetime.datetime.now)
     Bot = Column(String(100))
+
+class UtCategory(Base):
+    __tablename__ = "utCategories"
+    CategoryID = Column(String(10), primary_key=True)
+    isDeleted = Column(Boolean, default=False)
+    DatabaseID = Column(String(10))
+    ctTitle = Column(String(150))
+    ctDescription = Column(Text)
+    ctCreatedby = Column(String(10))
+    ctCreateddate = Column(DateTime, default=datetime.datetime.now)
+    ctModifiedby = Column(String(10))
+    ctModifieddate = Column(DateTime, default=datetime.datetime.now)
+
+class BcUnit(Base):
+    __tablename__ = "bcUnits"
+    UnitID = Column(String(300), primary_key=True)
+    isDeleted = Column(Boolean, default=False)
+    DatabaseID = Column(String(150))
+    unTitle = Column(String(300))
+    unSymbol = Column(String(300))
+    unCategory = Column(String(150))
+    unBase = Column(String(300))
+    unEquivalent = Column(String(300))
 
 class FnDocument(Base):
     __tablename__ = "fnDocuments"
