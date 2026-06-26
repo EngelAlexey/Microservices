@@ -99,7 +99,7 @@ class BroadcastInput(BaseModel):
 
 @app.get("/")
 def read_root():
-    return {"status": "System Online", "version": "5.1.0"}
+    return {"status": "System Online", "version": "5.2.0"}
 
 def _check_duplicate(file_id: str, database_id: str):
     db = SessionLocal()
