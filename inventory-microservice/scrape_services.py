@@ -1,6 +1,7 @@
 import requests
 import logging
 import re
+import html as _html
 from urllib.parse import urljoin, urlparse
 
 logger = logging.getLogger(__name__)
@@ -27,6 +28,45 @@ def scrape_product_page(url: str) -> tuple[str, str | None]:
         return html, image_url
     except:
         return None, None
+
+def extract_relevant_content(html: str, max_chars: int = 40000) -> str:
+    """Reduce el HTML crudo al contenido útil del producto antes de mandarlo a la IA.
+
+    El HTML completo está dominado por <head>, scripts, CSS y navegación del sitio,
+    donde vive la meta-description genérica de la tienda. Esto prioriza los datos
+    estructurados del producto (JSON-LD schema.org) y el texto real del <body>,
+    de modo que la descripción específica del producto entre dentro del límite.
+    """
+    if not html:
+        return ""
+
+    parts = []
+
+    # 1) Datos estructurados JSON-LD (schema.org/Product trae 'description' real del producto)
+    for m in re.finditer(
+        r'<script[^>]+type=["\']application/ld\+json["\'][^>]*>(.*?)</script>',
+        html, re.IGNORECASE | re.DOTALL,
+    ):
+        block = m.group(1).strip()
+        if block:
+            parts.append("[STRUCTURED DATA JSON-LD]\n" + block)
+
+    # 2) Texto del <body> sin ruido (scripts, estilos, navegación, etc.)
+    body_match = re.search(r'<body[^>]*>(.*?)</body>', html, re.IGNORECASE | re.DOTALL)
+    body = body_match.group(1) if body_match else html
+    body = re.sub(r'<!--.*?-->', ' ', body, flags=re.DOTALL)
+    body = re.sub(
+        r'<(script|style|svg|noscript|nav|header|footer|form|iframe)\b[^>]*>.*?</\1>',
+        ' ', body, flags=re.IGNORECASE | re.DOTALL,
+    )
+    body_text = re.sub(r'<[^>]+>', ' ', body)
+    body_text = _html.unescape(body_text)
+    body_text = re.sub(r'\s+', ' ', body_text).strip()
+    if body_text:
+        parts.append("[PAGE TEXT]\n" + body_text)
+
+    return "\n\n".join(parts)[:max_chars]
+
 
 def download_image_from_url(image_url: str) -> tuple[bytes | None, str | None]:
     if not image_url:
