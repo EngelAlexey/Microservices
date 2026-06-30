@@ -56,6 +56,13 @@ def strip_html_tags(text):
 def get_now_ca():
     return datetime.now(timezone(timedelta(hours=-6))).replace(tzinfo=None)
 
+def _is_manual_image(v: str) -> bool:
+    """True si `itImage` es una imagen subida manualmente vía AppSheet: una ruta relativa de su
+    carpeta (p.ej. 'bcItems_Images/…' o 'A00-Kaizen/Items/…'). El bot NO debe pisar estas.
+    Los valores del bot —vacío, nombre pelado sin '/', o una URL http(s)— devuelven False."""
+    v = (v or "").strip()
+    return bool(v) and "/" in v and not v.lower().startswith("http")
+
 def _load_product_catalog(db: Session, database_id: str):
     all_items = db.query(BcItemLn.ItemLnID, BcItemLn.lnCode, BcItemLn.lnTitle, BcItem.itTitle, BcItem.ItemID, BcItem.DriveID)\
                   .join(BcItem, BcItemLn.ItemID == BcItem.ItemID)\
@@ -525,6 +532,7 @@ def create_item_from_url_logic(db: Session, data: dict, image_url: str, database
     it_unit_symbol = str(data.get("itUnitSymbol") or "").strip()
     it_description = strip_html_tags(data.get("itDescription"))
     it_observations = strip_html_tags(data.get("itObservations"))
+    it_cabys = str(data.get("cabys") or data.get("CabysID") or "").strip()[:50]
     now = get_now_ca()
     if not it_title: return {"status": "error", "reason": "No se pudo extraer el nombre del producto"}
     brand_id = None
@@ -567,6 +575,7 @@ def create_item_from_url_logic(db: Session, data: dict, image_url: str, database
         if unit_id and not existing.UnitID: changes["UnitID"] = unit_id
         if it_observations and not existing.itObservations: changes["itObservations"] = it_observations
         if data.get("itWebsite") and not existing.itWebsite: changes["itWebsite"] = str(data.get("itWebsite"))[:500]
+        if it_cabys and not existing.CabysID: changes["CabysID"] = it_cabys
         if image_url and not existing.itImage: changes["itImage"] = image_url[:255]
         def _db_update_item():
             for k, v in changes.items(): setattr(existing, k, v)
@@ -580,7 +589,7 @@ def create_item_from_url_logic(db: Session, data: dict, image_url: str, database
             "itDescription": it_description or "", "itBrand": brand_id or "", "itCategory": category_id or "",
             "itSubcategory": it_subcategory or "", "itModel": it_model or "", "itSize": it_size or "",
             "UnitID": unit_id or "", "itCatalog": False, "itWebsite": it_website,
-            "itObservations": it_observations or "", "CabysID": "", "itStatus": True,
+            "itObservations": it_observations or "", "CabysID": it_cabys, "itStatus": True,
             "itImage": image_url[:255] if image_url else "",
             "itCreatedBy": "AI_BOT", "itCreatedAt": now, "itModifiedBy": "AI_BOT", "itModifiedAt": now,
             "Bot": "Importado desde URL",
@@ -591,7 +600,7 @@ def create_item_from_url_logic(db: Session, data: dict, image_url: str, database
                 itBrand=brand_id, itCategory=category_id or "", itSubcategory=it_subcategory or "", itModel=it_model or "",
                 itSize=it_size or "", UnitID=unit_id, itCatalog=False,
                 itWebsite=it_website, itObservations=it_observations or "",
-                CabysID="", itStatus=True, itImage=image_url[:255] if image_url else None,
+                CabysID=it_cabys, itStatus=True, itImage=image_url[:255] if image_url else None,
                 itCreatedBy="AI_BOT", itCreatedAt=now, itModifiedBy="AI_BOT", itModifiedAt=now, Bot="Importado desde URL"
             )
             db.add(new_item)
@@ -631,23 +640,40 @@ def create_item_from_url_logic(db: Session, data: dict, image_url: str, database
             db.commit()
         _appsheet_write_or_db(db, "bcItemsLns", "Edit", {"ItemLnID": existing_ln.ItemLnID, **ln_changes}, _db_update_ln, database_id)
     if image_url and image_folder_id:
+        # AppSheet renderiza una columna de imagen cuyo valor es una URL pública. El bot sube la
+        # imagen scrapeada a Drive (permiso anyone:reader) y guarda en `itImage` la URL thumbnail
+        # del archivo, que AppSheet muestra directo —sin columna virtual ni carpeta nativa. (La SA
+        # no puede escribir en la carpeta de la app, que vive en "Mi unidad"; ver memoria
+        # drive-auth-methods. Y la AppSheet API no ingiere la imagen desde la URL: solo guarda el
+        # string —probado—, pero como la columna es de tipo imagen, la URL basta para que renderice.)
+        # Antes se guardaba el nombre pelado `<ItemID>.jpg`, que AppSheet no resolvía por ruta.
+        # Se escribe vía AppSheet API (Edit) con fallback a BD, igual que el resto del catálogo.
         img_filename = f"{item_id}.jpg"
-        def upload_scraped_image(img_url, filename, folder_id, iid):
+        def upload_scraped_image(img_url, filename, folder_id, iid, db_id):
             from scrape_services import download_image_from_url
-            img_bytes, content_type = download_image_from_url(img_url)
-            if img_bytes:
+            from database import SessionLocal
+            s = SessionLocal()
+            try:
+                item = s.query(BcItem).filter(BcItem.ItemID == iid).first()
+                # Guard no-destructivo: no pisar una imagen subida manualmente (ruta de AppSheet).
+                # Se chequea ANTES de descargar/subir para no gastar Drive en vano.
+                if item is None or _is_manual_image(item.itImage):
+                    return
+                img_bytes, content_type = download_image_from_url(img_url)
+                if not img_bytes:
+                    return
                 drive_file_id = upload_image_to_drive(img_bytes, filename, content_type, folder_id)
-                if drive_file_id:
-                    from database import SessionLocal
-                    s = SessionLocal()
-                    try:
-                        item = s.query(BcItem).filter(BcItem.ItemID == iid).first()
-                        if item:
-                            item.DriveID = drive_file_id
-                            item.itImage = filename
-                            s.commit()
-                    finally: s.close()
-        t = threading.Thread(target=upload_scraped_image, args=(image_url, img_filename, image_folder_id, item_id), daemon=True)
+                if not drive_file_id:
+                    return
+                it_url = f"https://drive.google.com/thumbnail?authuser=0&sz=w1024&id={drive_file_id}"
+                def _db_update():
+                    item.itImage = it_url
+                    item.DriveID = drive_file_id
+                    s.commit()
+                _appsheet_write_or_db(s, "bcItems", "Edit", {"ItemID": iid, "itImage": it_url, "DriveID": drive_file_id}, _db_update, db_id)
+            finally:
+                s.close()
+        t = threading.Thread(target=upload_scraped_image, args=(image_url, img_filename, image_folder_id, item_id, database_id), daemon=True)
         t.start()
     return {"status": "success", "action": action, "item_id": item_id, "item_title": it_title, "brand_id": brand_id, "brand_name": it_brand_name or None, "database_id": database_id}
 

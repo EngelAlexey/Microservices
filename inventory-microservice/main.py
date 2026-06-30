@@ -13,6 +13,7 @@ from ai_services import extract_invoice_data, extract_company_data, extract_prod
 from logic import insert_document_logic, upsert_company_from_invoice_logic, create_item_from_url_logic, create_inventory_movements_logic, process_single_movement_logic, backfill_movement_costs_logic, sync_rfq_lines_logic, backfill_categories_logic, backfill_units_logic, backfill_sizes_logic, backfill_clean_titles_logic
 from drive_services import download_with_validation, resolve_file_id
 from scrape_services import scrape_product_page
+from suppliers import resolve_supplier, resolve_from_html
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -208,17 +209,32 @@ async def extract_company(payload: FilePayload, db: Session = Depends(get_db)):
 @app.post("/webhook/extract-from-url")
 async def extract_from_url(payload: UrlPayload, db: Session = Depends(get_db)):
     loop = asyncio.get_event_loop()
-    html, image_url = await loop.run_in_executor(_executor, scrape_product_page, payload.url)
-    if not html:
-        raise HTTPException(status_code=422, detail="No se pudo acceder a la URL")
-    data = extract_product_from_html(html)
+    # 1) Resolver dedicado del proveedor (datos limpios vía su API, p.ej. Algolia de Construplaza):
+    #    trae itImage real + barcode + CABYS. Si no hay resolver para el dominio (o falla),
+    #    cae al scraping genérico (Cloudflare render + extracción con IA).
+    data = await loop.run_in_executor(_executor, resolve_supplier, payload.url)
+    image_url = data.get("image_url") if data else None
+    barcode = data.get("barcode") if data else None
     if not data:
-        raise HTTPException(status_code=422, detail="Fallo extracción IA")
+        html, image_url = await loop.run_in_executor(_executor, scrape_product_page, payload.url)
+        if not html:
+            raise HTTPException(status_code=422, detail="No se pudo acceder a la URL")
+        # Datos estructurados schema.org/Product (JSON-LD) si la página los trae (imagen + GTIN
+        # confiables); si no, extracción con IA sobre el HTML renderizado.
+        jsonld = await loop.run_in_executor(_executor, resolve_from_html, html, payload.url)
+        if jsonld:
+            data = jsonld
+            image_url = jsonld.get("image_url") or image_url
+            barcode = jsonld.get("barcode")
+        else:
+            data = extract_product_from_html(html)
+    if not data or not str(data.get("itTitle") or "").strip():
+        raise HTTPException(status_code=422, detail="Fallo extracción del producto")
     try:
         img_folder = _resolve_image_folder(payload.image_folder_id)
         result = create_item_from_url_logic(
             db, data, image_url=image_url, database_id=payload.database_id,
-            image_folder_id=img_folder, item_id=payload.item_id
+            image_folder_id=img_folder, item_id=payload.item_id, barcode=barcode
         )
         return {"status": "success", "source_url": payload.url, "data": result}
     except Exception as e:
