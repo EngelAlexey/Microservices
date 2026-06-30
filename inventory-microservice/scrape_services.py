@@ -4,6 +4,8 @@ import re
 import html as _html
 from urllib.parse import urljoin, urlparse
 
+from render_services import is_configured as cf_configured, render_content
+
 logger = logging.getLogger(__name__)
 
 _HEADERS = {
@@ -12,23 +14,98 @@ _HEADERS = {
     "Accept-Language": "es-419,es;q=0.8,en-US;q=0.5,en;q=0.3",
 }
 
-def scrape_product_page(url: str) -> tuple[str, str | None]:
+# Pistas de que una URL de imagen es el logo/placeholder del sitio, no la foto del producto.
+# Evita el bug histórico de guardar el `og:image` (que en varias tiendas es el logo).
+_NON_PRODUCT_IMG = ("logo", "placeholder", "sprite", "favicon", "icon-", "/icons/", "no-image", "noimage")
+
+
+def _looks_like_product_image(u: str | None) -> bool:
+    if not u:
+        return False
+    return not any(h in u.lower() for h in _NON_PRODUCT_IMG)
+
+
+def _ellagar_image(url: str) -> str | None:
+    """El Lagar sirve la imagen del producto de forma determinística por código:
+    `.../Articulos_MED/{codigo}_MED.png` (alta) — el código va en la URL `/DetalleArticulo/{codigo}/…`.
+    Preferimos MED (alta) pero NO todos los artículos la tienen; si no existe (404) devolvemos None
+    para que la cascada use el `og:image` (versión PEQ) que sí entrega el HTML renderizado."""
+    m = re.search(r"/DetalleArticulo/(\d+)", url or "")
+    if not m:
+        return None
+    med = f"https://www.ellagar.com/SERV_ADMIN_FILES/Archivos/Imagenes/Articulos_MED/{m.group(1)}_MED.png"
     try:
-        response = requests.get(url, headers=_HEADERS, timeout=15)
-        response.raise_for_status()
-        html = response.text
-        og_match = re.search(r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\'](https?://[^"\']+)["\']', html, re.IGNORECASE)
-        if not og_match:
-            og_match = re.search(r'<meta[^>]+content=["\'](https?://[^"\']+)["\'][^>]+property=["\']og:image["\']', html, re.IGNORECASE)
-        image_url = og_match.group(1) if og_match else None
-        if not image_url:
-            img_match = re.search(r'<img[^>]+src=["\'](https?://[^"\']+\.(jpg|jpeg|png|webp))["\']', html, re.IGNORECASE)
-            if img_match:
-                image_url = img_match.group(1)
-        return html, image_url
-    except Exception as e:
-        logger.warning(f"No se pudo scrapear la página '{url}': {e}")
-        return None, None
+        if requests.head(med, headers=_HEADERS, timeout=8).status_code == 200:
+            return med
+    except Exception:
+        pass
+    return None
+
+
+# Reglas de imagen por dominio: cuando conocemos el patrón determinístico de imagen de un
+# proveedor (mejor/más confiable que rasguñar el HTML), se aplica primero. Extensible.
+_DOMAIN_IMAGE_RULES = {"ellagar.com": _ellagar_image}
+
+
+def extract_product_image(html: str, url: str | None = None) -> str | None:
+    """Extrae la URL de la IMAGEN del producto de un HTML (idealmente ya renderizado).
+
+    1) Regla por dominio si existe (imagen determinística de alta resolución, p.ej. El Lagar MED).
+    2) Cascada genérica descartando logos: og:image → <img> → CSS background-url (cubre el
+       `div.lupa` con `background:url(...)`). Devuelve None si solo aparecen logos/placeholders."""
+    if url:
+        host = urlparse(url).netloc.lower()
+        host = host[4:] if host.startswith("www.") else host
+        rule = _DOMAIN_IMAGE_RULES.get(host)
+        if rule:
+            u = rule(url)
+            if u:
+                return u
+    if not html:
+        return None
+    candidates = []
+
+    # 1) og:image (ambos órdenes de atributos)
+    for pat in (
+        r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\'](https?://[^"\']+)["\']',
+        r'<meta[^>]+content=["\'](https?://[^"\']+)["\'][^>]+property=["\']og:image["\']',
+    ):
+        m = re.search(pat, html, re.IGNORECASE)
+        if m:
+            candidates.append(m.group(1))
+
+    # 2) <img src> / data-src de producto
+    for m in re.finditer(r'<img[^>]+(?:src|data-src)=["\'](https?://[^"\']+?\.(?:jpg|jpeg|png|webp))', html, re.IGNORECASE):
+        candidates.append(m.group(1))
+
+    # 3) CSS background-image: url(...) — el `div.lupa` y similares (comillas pueden venir como &quot;)
+    h = _html.unescape(html)
+    for m in re.finditer(r'background(?:-image)?\s*:\s*url\(\s*["\']?(https?://[^)"\']+?\.(?:jpg|jpeg|png|webp))', h, re.IGNORECASE):
+        candidates.append(m.group(1))
+
+    for u in candidates:
+        if _looks_like_product_image(u):
+            return u
+    return None
+
+
+def scrape_product_page(url: str) -> tuple[str, str | None]:
+    """Devuelve (html, image_url). Usa Cloudflare Browser Rendering (render JS) cuando está
+    configurado —necesario para SPAs/catálogos JS—; si no, o si falla, cae a `requests`."""
+    html = None
+    if cf_configured():
+        html = render_content(url)
+        if not html:
+            logger.info(f"Cloudflare no devolvió HTML para '{url}'; se intenta requests")
+    if not html:
+        try:
+            response = requests.get(url, headers=_HEADERS, timeout=15)
+            response.raise_for_status()
+            html = response.text
+        except Exception as e:
+            logger.warning(f"No se pudo scrapear la página '{url}': {e}")
+            return None, None
+    return html, extract_product_image(html, url)
 
 def extract_relevant_content(html: str, max_chars: int = 40000) -> str:
     """Reduce el HTML crudo al contenido útil del producto antes de mandarlo a la IA.
